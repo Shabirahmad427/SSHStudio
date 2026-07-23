@@ -2,6 +2,7 @@ import SwiftUI
 
 struct InspectorView: View {
     @ObservedObject var open: OpenSession
+    @ObservedObject var connectionService: SSHConnectionService
     @ObservedObject private var log = ConnectionLog.shared
 
     private var endpoint: SSHHostEndpoint {
@@ -14,7 +15,7 @@ struct InspectorView: View {
                 LabeledContent("Profile", value: open.session.name)
                 LabeledContent("Endpoint", value: endpoint.displayName)
                 LabeledContent("State") {
-                    SSHStatusPill(style: SSHStudioStatusStyle.connection(open.connectionService.state))
+                    SSHConnectionStatusPill(service: connectionService)
                 }
             }
 

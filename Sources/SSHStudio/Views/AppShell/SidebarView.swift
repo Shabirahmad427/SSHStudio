@@ -121,7 +121,7 @@ struct SidebarView: View {
                         let open = openSessions.first { $0.session.id == session.id }
                         SidebarSessionRow(
                             session: session,
-                            state: open?.connectionService.state,
+                            open: open,
                             isSelected: open?.id == selectedOpenID,
                             isOpen: open != nil,
                             onSelect: { onSelect(session) }
@@ -185,7 +185,7 @@ struct SidebarView: View {
 
 private struct SidebarSessionRow: View {
     let session: Session
-    let state: SSHConnectionState?
+    let open: OpenSession?
     let isSelected: Bool
     let isOpen: Bool
     let onSelect: () -> Void
@@ -207,12 +207,16 @@ private struct SidebarSessionRow: View {
                         .lineLimit(1)
                 }
                 Spacer(minLength: SSHStudioSpacing.sm)
-                SSHStatusPill(style: SSHStudioStatusStyle.connection(state ?? .idle), showsTitle: false)
+                if let open {
+                    SSHConnectionStatusPill(service: open.connectionService, showsTitle: false)
+                } else {
+                    SSHStatusPill(style: SSHStudioStatusStyle.connection(.idle), showsTitle: false)
+                }
             }
             .frame(minHeight: SSHStudioMetrics.regularRowHeight)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("\(session.name), \(SSHStudioStatusStyle.connection(state ?? .idle).title)")
+        .accessibilityLabel("\(session.name), \(SSHStudioStatusStyle.connection(open?.connectionService.state ?? .idle).title)")
     }
 }

@@ -11,6 +11,7 @@ struct SessionTabBar: View {
                 ForEach(openSessions) { open in
                     SessionTabItem(
                         open: open,
+                        connectionService: open.connectionService,
                         isSelected: selectedID == open.id,
                         onSelect: { selectedID = open.id },
                         onClose: { onClose(open) }
@@ -26,6 +27,7 @@ struct SessionTabBar: View {
 
 private struct SessionTabItem: View {
     @ObservedObject var open: OpenSession
+    @ObservedObject var connectionService: SSHConnectionService
     let isSelected: Bool
     let onSelect: () -> Void
     let onClose: () -> Void
@@ -34,7 +36,7 @@ private struct SessionTabItem: View {
     var body: some View {
         Button(action: onSelect) {
             HStack(spacing: SSHStudioSpacing.xs) {
-                SSHStatusPill(style: SSHStudioStatusStyle.connection(open.connectionService.state), showsTitle: false)
+                SSHConnectionStatusPill(service: connectionService, showsTitle: false)
                 Text(open.session.name)
                     .font(isSelected ? SSHStudioTypography.bodyEmphasis : SSHStudioTypography.body)
                     .lineLimit(1)
@@ -59,6 +61,6 @@ private struct SessionTabItem: View {
         }
         .buttonStyle(.plain)
         .onHover { hovered = $0 }
-        .accessibilityLabel("\(open.session.name), \(SSHStudioStatusStyle.connection(open.connectionService.state).title)")
+        .accessibilityLabel("\(open.session.name), \(SSHStudioStatusStyle.connection(connectionService.state).title)")
     }
 }

@@ -71,6 +71,15 @@ struct SSHStatusPill: View {
     }
 }
 
+struct SSHConnectionStatusPill: View {
+    @ObservedObject var service: SSHConnectionService
+    var showsTitle = true
+
+    var body: some View {
+        SSHStatusPill(style: SSHStudioStatusStyle.connection(service.state), showsTitle: showsTitle)
+    }
+}
+
 struct SSHStudioEmptyState: View {
     let title: String
     let message: String

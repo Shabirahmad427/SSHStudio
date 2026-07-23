@@ -36,7 +36,7 @@ struct WorkspaceView: View {
                 }
                 if inspectorVisible, let selectedOpen {
                     Divider()
-                    InspectorView(open: selectedOpen)
+                    InspectorView(open: selectedOpen, connectionService: selectedOpen.connectionService)
                         .frame(
                             minWidth: SSHStudioMetrics.inspectorMinWidth,
                             idealWidth: SSHStudioMetrics.inspectorIdealWidth,
@@ -71,10 +71,6 @@ struct WorkspaceToolbar: View {
     @Binding var inspectorVisible: Bool
     let onQuickConnect: () -> Void
 
-    private var style: SSHStudioStatusStyle {
-        SSHStudioStatusStyle.connection(open?.connectionService.state ?? .idle)
-    }
-
     var body: some View {
         HStack(spacing: SSHStudioSpacing.sm) {
             Button(action: onQuickConnect) {
@@ -84,19 +80,7 @@ struct WorkspaceToolbar: View {
             .help("Quick Connect")
 
             if let open {
-                Picker("Workspace", selection: Binding(
-                    get: { open.activeTab },
-                    set: { open.activeTab = $0 }
-                )) {
-                    ForEach(SessionTab.workspaceOrder, id: \.self) { tab in
-                        Label(tab.rawValue, systemImage: tab.icon).tag(tab)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .frame(maxWidth: 420)
-
-                SSHStatusPill(style: style)
-                    .padding(.leading, SSHStudioSpacing.xs)
+                WorkspaceToolbarSessionControls(open: open, connectionService: open.connectionService)
             }
 
             Spacer()
@@ -127,6 +111,24 @@ struct WorkspaceToolbar: View {
         .padding(.horizontal, SSHStudioSpacing.md)
         .padding(.vertical, SSHStudioSpacing.sm)
         .background(.bar)
+    }
+}
+
+private struct WorkspaceToolbarSessionControls: View {
+    @ObservedObject var open: OpenSession
+    @ObservedObject var connectionService: SSHConnectionService
+
+    var body: some View {
+        Picker("Workspace", selection: $open.activeTab) {
+            ForEach(SessionTab.workspaceOrder, id: \.self) { tab in
+                Label(tab.rawValue, systemImage: tab.icon).tag(tab)
+            }
+        }
+        .pickerStyle(.segmented)
+        .frame(maxWidth: 420)
+
+        SSHConnectionStatusPill(service: connectionService)
+            .padding(.leading, SSHStudioSpacing.xs)
     }
 }
 
