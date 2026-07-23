@@ -76,6 +76,7 @@ struct WorkspaceToolbar: View {
             Button(action: onQuickConnect) {
                 Label("Quick Connect", systemImage: "bolt")
             }
+            .buttonStyle(.bordered)
             .keyboardShortcut("k", modifiers: .command)
             .help("Quick Connect")
 
@@ -90,6 +91,7 @@ struct WorkspaceToolbar: View {
             } label: {
                 Image(systemName: "textformat.size.smaller")
             }
+            .buttonStyle(.borderless)
             .help("Decrease Terminal Font")
 
             Button {
@@ -97,6 +99,7 @@ struct WorkspaceToolbar: View {
             } label: {
                 Image(systemName: "textformat.size.larger")
             }
+            .buttonStyle(.borderless)
             .help("Increase Terminal Font")
 
             Button {
@@ -104,9 +107,9 @@ struct WorkspaceToolbar: View {
             } label: {
                 Image(systemName: "sidebar.trailing")
             }
+            .buttonStyle(.borderless)
             .help("Toggle Inspector")
         }
-        .buttonStyle(.borderless)
         .controlSize(.small)
         .padding(.horizontal, SSHStudioSpacing.md)
         .padding(.vertical, SSHStudioSpacing.sm)

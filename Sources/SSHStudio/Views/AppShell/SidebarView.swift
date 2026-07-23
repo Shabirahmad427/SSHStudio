@@ -103,7 +103,11 @@ struct SidebarView: View {
         .font(SSHStudioTypography.body)
         .padding(.horizontal, SSHStudioSpacing.sm)
         .frame(height: 28)
-        .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: SSHStudioMetrics.controlCornerRadius))
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: SSHStudioMetrics.controlCornerRadius))
+        .overlay {
+            RoundedRectangle(cornerRadius: SSHStudioMetrics.controlCornerRadius)
+                .strokeBorder(SSHStudioColors.separator.opacity(0.45), lineWidth: 1)
+        }
         .padding(.horizontal, SSHStudioSpacing.md)
         .padding(.bottom, SSHStudioSpacing.sm)
     }
@@ -127,6 +131,7 @@ struct SidebarView: View {
                             onSelect: { onSelect(session) }
                         )
                         .tag(open?.id)
+                        .listRowInsets(EdgeInsets(top: 3, leading: 10, bottom: 3, trailing: 10))
                         .contextMenu {
                             Button("Connect") { onSelect(session) }
                             Button("Edit") { editingSession = session }
@@ -208,9 +213,9 @@ private struct SidebarSessionRow: View {
                 }
                 Spacer(minLength: SSHStudioSpacing.sm)
                 if let open {
-                    SSHConnectionStatusPill(service: open.connectionService, showsTitle: false)
+                    SSHConnectionStatusPill(service: open.connectionService, showsTitle: true)
                 } else {
-                    SSHStatusPill(style: SSHStudioStatusStyle.connection(.idle), showsTitle: false)
+                    SSHStatusPill(style: SSHStudioStatusStyle.connection(.idle), showsTitle: true)
                 }
             }
             .frame(minHeight: SSHStudioMetrics.regularRowHeight)

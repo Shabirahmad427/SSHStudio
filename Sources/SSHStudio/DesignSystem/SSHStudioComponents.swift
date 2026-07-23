@@ -67,6 +67,7 @@ struct SSHStatusPill: View {
         }
         .font(SSHStudioTypography.status)
         .foregroundStyle(.secondary)
+        .fixedSize(horizontal: true, vertical: false)
         .accessibilityLabel(style.title)
     }
 }
