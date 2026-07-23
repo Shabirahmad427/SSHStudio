@@ -22,5 +22,10 @@ let package = Package(
                 ]),
             ],
         ),
+        .testTarget(
+            name: "SSHStudioTests",
+            dependencies: ["SSHStudio"],
+            path: "Tests/SSHStudioTests"
+        ),
     ]
 )

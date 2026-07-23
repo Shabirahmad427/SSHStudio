@@ -1,14 +1,22 @@
 import Foundation
 
 struct Session: Codable, Identifiable, Hashable {
+    static let currentSchemaVersion = 1
+
+    var schemaVersion: Int = Self.currentSchemaVersion
     var id: UUID = UUID()
     var name: String
     var host: String
     var port: Int = 22
     var username: String
     var authMethod: AuthMethod = .password
+    /// Sensitive operational metadata. This is a local file reference, not a
+    /// credential value, and is preserved for compatibility with existing profiles.
     var privateKeyPath: String = ""
+    /// Sensitive operational metadata. The referenced ~/.ssh/config entry may
+    /// reveal routing information and is preserved for compatibility.
     var sshConfigAlias: String = ""
+    var credentialReferenceID: String = ""
     var remoteDirectory: String = ""
     var screenSharingHost: String = ""
     var screenSharingPort: Int = 5900
@@ -24,7 +32,8 @@ struct Session: Codable, Identifiable, Hashable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, name, host, port, username, authMethod, privateKeyPath, sshConfigAlias, remoteDirectory
+        case schemaVersion, id, name, host, port, username, authMethod
+        case privateKeyPath, sshConfigAlias, credentialReferenceID, remoteDirectory
         case screenSharingHost, screenSharingPort
         case remoteScreenMode, remoteAccessAddress, tunnels
     }
@@ -38,6 +47,7 @@ struct Session: Codable, Identifiable, Hashable {
         authMethod: AuthMethod = .password,
         privateKeyPath: String = "",
         sshConfigAlias: String = "",
+        credentialReferenceID: String = "",
         remoteDirectory: String = "",
         screenSharingHost: String = "",
         screenSharingPort: Int = 5900,
@@ -53,6 +63,7 @@ struct Session: Codable, Identifiable, Hashable {
         self.authMethod = authMethod
         self.privateKeyPath = privateKeyPath
         self.sshConfigAlias = sshConfigAlias
+        self.credentialReferenceID = credentialReferenceID
         self.remoteDirectory = remoteDirectory
         self.screenSharingHost = screenSharingHost
         self.screenSharingPort = screenSharingPort
@@ -63,6 +74,7 @@ struct Session: Codable, Identifiable, Hashable {
 
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try values.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? Self.currentSchemaVersion
         id = try values.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
         name = try values.decode(String.self, forKey: .name)
         host = try values.decode(String.self, forKey: .host)
@@ -71,6 +83,7 @@ struct Session: Codable, Identifiable, Hashable {
         authMethod = try values.decodeIfPresent(AuthMethod.self, forKey: .authMethod) ?? .password
         privateKeyPath = try values.decodeIfPresent(String.self, forKey: .privateKeyPath) ?? ""
         sshConfigAlias = try values.decodeIfPresent(String.self, forKey: .sshConfigAlias) ?? ""
+        credentialReferenceID = try values.decodeIfPresent(String.self, forKey: .credentialReferenceID) ?? ""
         remoteDirectory = try values.decodeIfPresent(String.self, forKey: .remoteDirectory) ?? ""
         screenSharingHost = try values.decodeIfPresent(String.self, forKey: .screenSharingHost) ?? ""
         screenSharingPort = try values.decodeIfPresent(Int.self, forKey: .screenSharingPort) ?? 5900
