@@ -1,0 +1,44 @@
+.DS_Store
+
+# SwiftPM and Xcode build products
+.build/
+DerivedData/
+.swiftpm/
+*.xcuserstate
+
+# Generated application/distribution artifacts
+*.app/
+*.dSYM/
+*.xcarchive/
+*.pkg
+*.dmg
+
+# Local signing material
+*.cer
+*.crt
+*.key
+*.p12
+*.pem
+*.mobileprovision
+*.keychain
+*.keychain-db
+codesign/
+signing/
+
+# Diagnostics and local exports
+diagnostic-exports/
+diagnostics/
+*.diagnostic.json
+*.diagnostics.json
+*.log
+
+# Temporary synchronization files
+*.sshstudio-download-partial
+*.sshstudio-upload-*
+*.sshstudio-relay-*
+ssh-studio-sftp-*.batch
+
+# Local environment/configuration
+.env
+.env.*
+!.env.example

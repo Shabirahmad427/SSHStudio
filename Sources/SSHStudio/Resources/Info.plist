@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.sshstudio.app</string>
+    <key>CFBundleName</key>
+    <string>SSH Studio</string>
+    <key>CFBundleExecutable</key>
+    <string>SSHStudio</string>
+    <key>CFBundleDisplayName</key>
+    <string>SSH Studio</string>
+    <key>CFBundleVersion</key>
+    <string>2</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleIconFile</key>
+    <string>SSHStudio.icns</string>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <!-- Populate these before publishing updates. The updater refuses non-HTTPS URLs. -->
+    <key>SSHStudioUpdateManifestURL</key>
+    <string></string>
+    <!-- Base64-encoded 32-byte Ed25519 public key. Keep the private key offline. -->
+    <key>SSHStudioUpdatePublicKey</key>
+    <string></string>
+</dict>
+</plist>
