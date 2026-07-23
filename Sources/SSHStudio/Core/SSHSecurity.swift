@@ -9,20 +9,7 @@ enum SSHSecurity {
     }
 
     static func rsyncSSHArgs(for session: Session, qos: String = "throughput") -> [String] {
-        var args = [
-            "ssh",
-            "-o", "BatchMode=yes",
-            "-o", "ControlMaster=no",
-            "-o", "ControlPath=\(controlPath(for: session))",
-            "-o", "Compression=no",
-            "-o", "IPQoS=\(qos)"
-        ]
-        args += baseOptions
-        if session.authMethod == .privateKey && !session.privateKeyPath.isEmpty {
-            args += ["-o", "IdentitiesOnly=yes", "-i", session.privateKeyPath]
-        }
-        args += ["-p", "\(session.port)"]
-        return args
+        SSHCommandBuilder.rsyncSSHArgs(for: session, qos: qos)
     }
 
     static func validateNonInteractive(session: Session, purpose: String) throws {

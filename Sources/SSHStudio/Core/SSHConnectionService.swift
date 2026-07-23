@@ -3,8 +3,9 @@ import Foundation
 enum SSHConnectionState: Equatable {
     case idle
     case preparing(Date)
+    case checkingHostIdentity(SSHHostEndpoint)
     case connecting(Date)
-    case awaitingHostVerification(String)
+    case awaitingHostVerification(SSHHostEndpoint)
     case authenticating
     case connected(Date)
     case reconnecting(attempt: Int, nextAttempt: Date)
@@ -16,6 +17,7 @@ enum SSHConnectionState: Equatable {
         switch self {
         case .idle: return "Idle"
         case .preparing: return "Preparing"
+        case .checkingHostIdentity: return "Checking host"
         case .connecting: return "Connecting"
         case .awaitingHostVerification: return "Host verification"
         case .authenticating: return "Authenticating"
@@ -29,8 +31,10 @@ enum SSHConnectionState: Equatable {
 
     var safeDetail: String? {
         switch self {
-        case .awaitingHostVerification(let host):
-            return DiagnosticRedactor.redact("Verify host \(host)", sensitiveValues: [host])
+        case .checkingHostIdentity(let endpoint):
+            return DiagnosticRedactor.redact("Checking \(endpoint.displayName)", sensitiveValues: [endpoint.displayName])
+        case .awaitingHostVerification(let endpoint):
+            return DiagnosticRedactor.redact("Verify \(endpoint.displayName)", sensitiveValues: [endpoint.displayName])
         case .reconnecting(let attempt, let next):
             return "Attempt \(attempt), next \(next.formatted(date: .omitted, time: .standard))"
         case .disconnected(_, let status):
@@ -44,7 +48,7 @@ enum SSHConnectionState: Equatable {
 
     var isActive: Bool {
         switch self {
-        case .preparing, .connecting, .awaitingHostVerification, .authenticating, .connected, .reconnecting, .disconnecting:
+        case .preparing, .checkingHostIdentity, .connecting, .awaitingHostVerification, .authenticating, .connected, .reconnecting, .disconnecting:
             return true
         case .idle, .disconnected, .failed:
             return false
@@ -73,6 +77,21 @@ final class SSHConnectionService: ObservableObject {
     func prepare() {
         state = .preparing(Date())
         record(.connection, .debug, "Preparing SSH connection")
+    }
+
+    func checkingHostIdentity(_ endpoint: SSHHostEndpoint) {
+        state = .checkingHostIdentity(endpoint)
+        record(.hostKey, .debug, "Checking host identity")
+    }
+
+    func awaitingHostVerification(_ endpoint: SSHHostEndpoint) {
+        state = .awaitingHostVerification(endpoint)
+        record(.hostKey, .warning, "Awaiting host verification")
+    }
+
+    func hostIdentityFailed(_ message: String) {
+        state = .failed(Date(), message: DiagnosticRedactor.redact(message))
+        record(.hostKey, .error, message)
     }
 
     func processStarted() {
