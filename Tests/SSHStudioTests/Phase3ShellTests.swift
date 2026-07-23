@@ -29,4 +29,19 @@ struct Phase3ShellTests {
         #expect(failed.title == "Failed")
         #expect(!failed.systemImage.isEmpty)
     }
+
+    @Test func defaultsUseStandardDomainWithoutPreviewOverride() {
+        let defaults = SSHStudioDefaults.makeSharedDefaults(environment: [:])
+        #expect(defaults === UserDefaults.standard)
+    }
+
+    @Test func defaultsCanUseExplicitPreviewSuite() {
+        let suiteName = "com.sshstudio.tests.\(UUID().uuidString)"
+        let defaults = SSHStudioDefaults.makeSharedDefaults(environment: [
+            SSHStudioDefaults.suiteOverrideEnvironmentKey: suiteName
+        ])
+        defaults.set("fixture", forKey: "phase3-test")
+        #expect(UserDefaults(suiteName: suiteName)?.string(forKey: "phase3-test") == "fixture")
+        UserDefaults.standard.removePersistentDomain(forName: suiteName)
+    }
 }
