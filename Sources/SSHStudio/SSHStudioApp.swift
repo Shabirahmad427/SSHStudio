@@ -34,6 +34,11 @@ struct SSHStudioApp: App {
                     NotificationCenter.default.post(name: .showSSHStudioQuickConnect, object: nil)
                 }
                 .keyboardShortcut("k", modifiers: .command)
+
+                Button("Known Hosts...") {
+                    NotificationCenter.default.post(name: .showSSHStudioKnownHosts, object: nil)
+                }
+                .keyboardShortcut("h", modifiers: [.command, .shift])
             }
             CommandMenu("Appearance") {
                 ForEach(AppAppearance.allCases, id: \.self) { option in

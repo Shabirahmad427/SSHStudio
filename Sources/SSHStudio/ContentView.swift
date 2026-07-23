@@ -4,6 +4,13 @@ import SwiftUI
 extension Notification.Name {
     static let showSSHStudioCommandPalette = Notification.Name("showSSHStudioCommandPalette")
     static let showSSHStudioQuickConnect = Notification.Name("showSSHStudioQuickConnect")
+    static let showSSHStudioKnownHosts = Notification.Name("showSSHStudioKnownHosts")
+    static let sshStudioHostTrustApproved = Notification.Name("sshStudioHostTrustApproved")
+}
+
+private struct HostKeyTrustSheetItem: Identifiable {
+    let id = UUID()
+    let state: SSHHostTrustState
 }
 
 enum StudioTheme {
@@ -212,11 +219,13 @@ class OpenSession: Identifiable, ObservableObject {
 struct ContentView: View {
     @StateObject private var store = SessionStore()
     @StateObject private var sshManager = SSHManager()
+    @StateObject private var hostKeyModel = HostKeyVerificationModel.shared
     @State private var openSessions: [OpenSession] = []
     @State private var selectedOpenID: UUID?
     @State private var showQuickConnect = false
     @State private var showCommandPalette = false
     @State private var showTerminalSettings = false
+    @State private var showKnownHosts = false
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
 
     var selectedOpen: OpenSession? {
@@ -282,6 +291,37 @@ struct ContentView: View {
         .sheet(isPresented: $showTerminalSettings) {
             TerminalSettingsView()
         }
+        .sheet(isPresented: $showKnownHosts) {
+            KnownHostsView()
+        }
+        .sheet(item: hostKeyTrustSheetBinding) { item in
+            HostKeyTrustSheet(
+                state: item.state,
+                onTrust: { candidate in
+                    Task {
+                        do {
+                            try await hostKeyModel.approve(candidate: candidate)
+                            NotificationCenter.default.post(
+                                name: .sshStudioHostTrustApproved,
+                                object: nil,
+                                userInfo: ["endpointKey": candidate.endpoint.key]
+                            )
+                        } catch {
+                            selectedOpen?.connectionService.hostIdentityFailed(error.localizedDescription)
+                        }
+                    }
+                },
+                onCancel: {
+                    Task {
+                        await hostKeyModel.cancel()
+                        selectedOpen?.connectionService.hostIdentityFailed("Host verification cancelled.")
+                    }
+                },
+                onOpenManager: {
+                    showKnownHosts = true
+                }
+            )
+        }
         .onKeyPress(.init("p"), phases: .down) { press in
             guard press.modifiers == [.command, .shift] else { return .ignored }
             showCommandPalette = true
@@ -298,9 +338,25 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .showSSHStudioQuickConnect)) { _ in
             showQuickConnect = true
         }
+        .onReceive(NotificationCenter.default.publisher(for: .showSSHStudioKnownHosts)) { _ in
+            showKnownHosts = true
+        }
         .onChange(of: store.sessions) { _, sessions in
             refreshOpenSessions(from: sessions)
         }
+    }
+
+    private var hostKeyTrustSheetBinding: Binding<HostKeyTrustSheetItem?> {
+        Binding(
+            get: {
+                hostKeyModel.pendingState.map { HostKeyTrustSheetItem(state: $0) }
+            },
+            set: { value in
+                if value == nil {
+                    Task { await hostKeyModel.cancel() }
+                }
+            }
+        )
     }
 
     private func openOrSwitch(_ session: Session) {
@@ -844,8 +900,9 @@ struct SessionDetailView: View {
             }
 
             ZStack {
-                TerminalTabView(session: session)
-                    .environmentObject(connectionService)
+                                TerminalTabView(session: session)
+                                    .environmentObject(connectionService)
+                                    .environmentObject(HostKeyVerificationModel.shared)
                     .id(terminalInstanceID)
                     .opacity(activeTab == .terminal ? 1 : 0)
                     .allowsHitTesting(activeTab == .terminal)
@@ -883,6 +940,11 @@ struct SessionDetailView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .onReceive(NotificationCenter.default.publisher(for: .sshStudioHostTrustApproved)) { note in
+                guard let endpointKey = note.userInfo?["endpointKey"] as? String,
+                      endpointKey == SSHHostEndpoint(session: session).key else { return }
+                terminalInstanceID = UUID()
+            }
 
             StatusBarView(
                 session: session,
@@ -1040,7 +1102,7 @@ struct StatusBarView: View {
     private var connectionColor: Color {
         switch connectionState {
         case .connected: return .green
-        case .connecting, .preparing, .authenticating, .awaitingHostVerification, .reconnecting: return .orange
+        case .connecting, .preparing, .checkingHostIdentity, .authenticating, .awaitingHostVerification, .reconnecting: return .orange
         case .failed: return .red
         case .disconnecting: return .yellow
         case .idle, .disconnected: return .secondary

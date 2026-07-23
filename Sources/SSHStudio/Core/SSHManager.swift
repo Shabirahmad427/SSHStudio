@@ -11,6 +11,19 @@ class SSHManager: ObservableObject {
     private var reconnectAttempts: [UUID: Int] = [:]
     private let reconnectPolicy = SSHReconnectPolicy()
 
+    init() {
+        _ = NotificationCenter.default.addObserver(
+            forName: .sshStudioHostTrustApproved,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            guard let endpointKey = note.userInfo?["endpointKey"] as? String else { return }
+            Task { @MainActor [weak self] in
+                self?.resumeApprovedTunnels(endpointKey: endpointKey)
+            }
+        }
+    }
+
     func sshArgs(for session: Session) -> [String] {
         (try? SSHCommandBuilder.terminalInvocation(for: session).arguments) ?? SSHSecurity.destinationArgs(for: session)
     }
@@ -19,7 +32,7 @@ class SSHManager: ObservableObject {
         requestedTunnels[tunnel.id] = (tunnel, session)
         reconnectTasks[tunnel.id]?.cancel()
         reconnectTasks[tunnel.id] = nil
-        launchTunnel(tunnel: tunnel, session: session)
+        verifyThenLaunchTunnel(tunnel: tunnel, session: session)
     }
 
     func stopTunnel(id: UUID) {
@@ -100,6 +113,38 @@ class SSHManager: ObservableObject {
         }
     }
 
+    private func verifyThenLaunchTunnel(tunnel: TunnelConfig, session: Session) {
+        let endpoint = SSHHostEndpoint(session: session)
+        tunnelStates[tunnel.id] = .checkingHostIdentity(endpoint)
+        Task { @MainActor [weak self] in
+            guard let self, self.requestedTunnels[tunnel.id] != nil else { return }
+            let state = await HostKeyVerificationModel.shared.evaluate(session: session)
+            guard self.requestedTunnels[tunnel.id] != nil else { return }
+            switch state {
+            case .trustedBySystem, .trustedBySSHStudio:
+                self.launchTunnel(tunnel: tunnel, session: session)
+            case .unknown:
+                self.tunnelStates[tunnel.id] = .awaitingHostVerification(endpoint)
+            case .changed:
+                let message = "Host identity changed. Tunnel blocked."
+                self.tunnelErrors[tunnel.id] = message
+                self.tunnelStates[tunnel.id] = .failed(Date(), message: message)
+            case .failed(let message), .unavailable(let message):
+                self.tunnelErrors[tunnel.id] = message
+                self.tunnelStates[tunnel.id] = .failed(Date(), message: message)
+            default:
+                break
+            }
+        }
+    }
+
+    private func resumeApprovedTunnels(endpointKey: String) {
+        for (id, pair) in requestedTunnels where SSHHostEndpoint(session: pair.1).key == endpointKey {
+            guard activeTunnels[id] == nil else { continue }
+            launchTunnel(tunnel: pair.0, session: pair.1)
+        }
+    }
+
     private func handleTunnelExit(id: UUID, process: Process, status: Int32, message: String?) {
         guard activeTunnels[id] === process else { return }
         activeTunnels.removeValue(forKey: id)
@@ -128,7 +173,7 @@ class SSHManager: ObservableObject {
             try? await Task.sleep(for: .seconds(delay))
             guard !Task.isCancelled, let self, self.requestedTunnels[id] != nil else { return }
             self.reconnectTasks[id] = nil
-            self.launchTunnel(tunnel: tunnel, session: session)
+            self.verifyThenLaunchTunnel(tunnel: tunnel, session: session)
         }
     }
 }

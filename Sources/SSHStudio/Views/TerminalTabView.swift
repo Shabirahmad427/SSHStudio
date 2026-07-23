@@ -5,6 +5,7 @@ struct TerminalTabView: View {
     let session: Session
     @ObservedObject private var termSettings = TerminalSettings.shared
     @EnvironmentObject private var connectionService: SSHConnectionService
+    @EnvironmentObject private var hostKeyModel: HostKeyVerificationModel
     @State private var connectionNotice: String?
 
     var body: some View {
@@ -49,6 +50,9 @@ struct TerminalTabView: View {
                 invocation: terminalInvocation(for: session),
                 sessionName: session.name,
                 settings: termSettings,
+                verifyHost: {
+                    await verifyHostBeforeConnect()
+                },
                 onPrepare: {
                     connectionService.prepare()
                 },
@@ -81,8 +85,31 @@ struct TerminalTabView: View {
                 purpose: .terminal,
                 executableURL: SSHCommandBuilder.sshExecutableURL,
                 arguments: ["-V"],
+                hostKeyPolicy: .openSSHDefault,
                 sensitiveValues: []
             )
+        }
+    }
+
+    @MainActor
+    private func verifyHostBeforeConnect() async -> Bool {
+        let endpoint = SSHHostEndpoint(session: session)
+        connectionService.checkingHostIdentity(endpoint)
+        let state = await hostKeyModel.evaluate(session: session)
+        switch state {
+        case .trustedBySystem, .trustedBySSHStudio:
+            return true
+        case .unknown:
+            connectionService.awaitingHostVerification(endpoint)
+            return false
+        case .changed:
+            connectionService.hostIdentityFailed("Host identity changed. Connection blocked.")
+            return false
+        case .failed(let message), .unavailable(let message):
+            connectionService.hostIdentityFailed(message)
+            return false
+        default:
+            return false
         }
     }
 }
@@ -93,6 +120,7 @@ struct SSHTerminalView: NSViewRepresentable {
     let invocation: SSHInvocation
     let sessionName: String
     @ObservedObject var settings: TerminalSettings
+    var verifyHost: (@MainActor @Sendable () async -> Bool)? = nil
     var onPrepare: (@MainActor @Sendable () -> Void)? = nil
     var onConnect: (@MainActor @Sendable () -> Void)? = nil
 
@@ -121,9 +149,12 @@ struct SSHTerminalView: NSViewRepresentable {
                 onPrepare()
             }
         }
-        tv.startProcess(executable: invocation.executableURL.path, args: invocation.arguments)
-        if let onConnect {
-            Task { @MainActor in
+        Task { @MainActor in
+            if let verifyHost {
+                guard await verifyHost() else { return }
+            }
+            tv.startProcess(executable: invocation.executableURL.path, args: invocation.arguments)
+            if let onConnect {
                 onConnect()
             }
         }
