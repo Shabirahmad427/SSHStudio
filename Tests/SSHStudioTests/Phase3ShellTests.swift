@@ -44,4 +44,21 @@ struct Phase3ShellTests {
         #expect(UserDefaults(suiteName: suiteName)?.string(forKey: "phase3-test") == "fixture")
         UserDefaults.standard.removePersistentDomain(forName: suiteName)
     }
+
+    @Test func defaultsCanLoadVolatilePreviewPlist() throws {
+        let suiteName = "com.sshstudio.tests.\(UUID().uuidString)"
+        let plistURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("sshstudio-preview-\(UUID().uuidString).plist")
+        let payload: NSDictionary = ["saved_sessions": Data("[]".utf8)]
+        #expect(payload.write(to: plistURL, atomically: true))
+
+        let defaults = SSHStudioDefaults.makeSharedDefaults(environment: [
+            SSHStudioDefaults.suiteOverrideEnvironmentKey: suiteName,
+            SSHStudioDefaults.plistOverrideEnvironmentKey: plistURL.path
+        ])
+
+        #expect(defaults.data(forKey: "saved_sessions") == Data("[]".utf8))
+        try? FileManager.default.removeItem(at: plistURL)
+        UserDefaults.standard.removePersistentDomain(forName: suiteName)
+    }
 }
