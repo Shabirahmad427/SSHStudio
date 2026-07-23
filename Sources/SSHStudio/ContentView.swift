@@ -202,6 +202,7 @@ class OpenSession: Identifiable, ObservableObject {
     @Published var session: Session
     @Published var activeTab: SessionTab = .terminal
     let sftpManager = SFTPManager()
+    let connectionService = SSHConnectionService()
     let sftpLocalHistory = NavigationHistory<URL>(initial: URL(fileURLWithPath: NSHomeDirectory()))
     init(session: Session) { self.session = session }
 }
@@ -303,6 +304,10 @@ struct ContentView: View {
     }
 
     private func openOrSwitch(_ session: Session) {
+        if let existing = openSessions.first(where: { $0.session.id == session.id }) {
+            selectedOpenID = existing.id
+            return
+        }
         let open = OpenSession(session: session)
         openSessions.append(open)
         selectedOpenID = open.id
@@ -762,6 +767,7 @@ struct SessionDetailWrapper: View {
             sshManager: sshManager,
             activeTab: $open.activeTab,
             sftpManager: open.sftpManager,
+            connectionService: open.connectionService,
             sftpLocalHistory: open.sftpLocalHistory,
             allSessions: store.sessions
         )
@@ -775,9 +781,11 @@ struct SessionDetailView: View {
     @ObservedObject var sshManager: SSHManager
     @Binding var activeTab: SessionTab
     @ObservedObject var sftpManager: SFTPManager
+    @ObservedObject var connectionService: SSHConnectionService
     @ObservedObject var sftpLocalHistory: NavigationHistory<URL>
     let allSessions: [Session]
     @State private var showTerminalSettings = false
+    @State private var terminalInstanceID = UUID()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -837,6 +845,8 @@ struct SessionDetailView: View {
 
             ZStack {
                 TerminalTabView(session: session)
+                    .environmentObject(connectionService)
+                    .id(terminalInstanceID)
                     .opacity(activeTab == .terminal ? 1 : 0)
                     .allowsHitTesting(activeTab == .terminal)
                     .zIndex(activeTab == .terminal ? 1 : 0)
@@ -874,7 +884,16 @@ struct SessionDetailView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            StatusBarView(session: session)
+            StatusBarView(
+                session: session,
+                connectionService: connectionService,
+                onReconnect: {
+                    terminalInstanceID = UUID()
+                },
+                onCancelReconnect: {
+                    connectionService.cancelReconnect()
+                }
+            )
         }
     }
 
@@ -941,6 +960,9 @@ private struct TerminalWorkspaceControls: View {
 
 struct StatusBarView: View {
     let session: Session
+    @ObservedObject var connectionService: SSHConnectionService
+    var onReconnect: () -> Void = {}
+    var onCancelReconnect: () -> Void = {}
     @ObservedObject var queue = TransferQueue.shared
     @ObservedObject var log = ConnectionLog.shared
 
@@ -949,8 +971,32 @@ struct StatusBarView: View {
     var body: some View {
         HStack(spacing: 8) {
             HStack(spacing: 4) {
-                Circle().fill(StudioTheme.accent).frame(width: 5, height: 5)
-                Text("Workspace open").font(.system(size: 11)).foregroundStyle(.secondary)
+                Circle().fill(connectionColor).frame(width: 5, height: 5)
+                Text(connectionLabel).font(.system(size: 11)).foregroundStyle(.secondary)
+                if let detail = connectionState.safeDetail {
+                    Text(detail)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
+                if showsReconnect {
+                    Button {
+                        onReconnect()
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .buttonStyle(.plain)
+                    .help("Reconnect")
+                }
+                if case .reconnecting = connectionState {
+                    Button {
+                        onCancelReconnect()
+                    } label: {
+                        Image(systemName: "xmark.circle")
+                    }
+                    .buttonStyle(.plain)
+                    .help("Cancel reconnect")
+                }
             }
 
             if queue.activeCount > 0 {
@@ -981,6 +1027,33 @@ struct StatusBarView: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 4)
         .background(.ultraThinMaterial.opacity(0.75))
+    }
+
+    private var connectionState: SSHConnectionState {
+        connectionService.state
+    }
+
+    private var connectionLabel: String {
+        connectionState.displayLabel
+    }
+
+    private var connectionColor: Color {
+        switch connectionState {
+        case .connected: return .green
+        case .connecting, .preparing, .authenticating, .awaitingHostVerification, .reconnecting: return .orange
+        case .failed: return .red
+        case .disconnecting: return .yellow
+        case .idle, .disconnected: return .secondary
+        }
+    }
+
+    private var showsReconnect: Bool {
+        switch connectionState {
+        case .disconnected, .failed:
+            return true
+        default:
+            return false
+        }
     }
 }
 

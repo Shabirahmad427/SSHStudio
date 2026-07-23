@@ -4,6 +4,7 @@ import SwiftTerm
 struct TerminalTabView: View {
     let session: Session
     @ObservedObject private var termSettings = TerminalSettings.shared
+    @EnvironmentObject private var connectionService: SSHConnectionService
     @State private var connectionNotice: String?
 
     var body: some View {
@@ -36,6 +37,7 @@ struct TerminalTabView: View {
             let exitLabel = exitCode.map { "SSH exited with code \($0)" } ?? "SSH disconnected"
             let details = tail.isEmpty ? exitLabel : "\(exitLabel): \(tail)"
             connectionNotice = details
+            connectionService.processTerminated(exitStatus: exitCode, message: tail)
             ConnectionLog.shared.log(details, level: .error, session: session.name)
         }
     }
@@ -44,12 +46,15 @@ struct TerminalTabView: View {
     private var terminalStack: some View {
         VStack(spacing: 0) {
             SSHTerminalView(
-                executable: "/usr/bin/ssh",
-                args: sshArgs(for: session),
+                invocation: terminalInvocation(for: session),
                 sessionName: session.name,
                 settings: termSettings,
+                onPrepare: {
+                    connectionService.prepare()
+                },
                 onConnect: {
                     connectionNotice = nil
+                    connectionService.processStarted()
                     ConnectionLog.shared.log("SSH process started", level: .info, session: session.name)
                 }
             )
@@ -63,33 +68,32 @@ struct TerminalTabView: View {
     }
 
     func sshArgs(for session: Session) -> [String] {
-        var args: [String] = []
+        terminalInvocation(for: session).arguments
+    }
 
-        // Keep the visible terminal independent from SFTP/rsync multiplexing.
-        // Otherwise a transfer can make this process a shared mux client, which
-        // exits with "Shared connection ... closed" when the background socket changes.
-        args += ["-o", "ControlMaster=no"]
-
-        // Keepalive
-        args += SSHSecurity.baseOptions
-
-        // Low-latency interactive settings
-        args += ["-o", "IPQoS=lowdelay"]          // prioritise small interactive packets
-        args += ["-o", "Compression=no"]           // compression adds CPU lag for keystrokes
-        args += ["-o", "RequestTTY=yes"]
-
-        // macOS OpenSSH defaults track algorithm deprecations with OS security updates.
-        return args + SSHSecurity.destinationArgs(for: session)
+    private func terminalInvocation(for session: Session) -> SSHInvocation {
+        do {
+            return try SSHCommandBuilder.terminalInvocation(for: session)
+        } catch {
+            let message = DiagnosticRedactor.redact(error.localizedDescription)
+            connectionService.processTerminated(exitStatus: 255, message: message)
+            return SSHInvocation(
+                purpose: .terminal,
+                executableURL: SSHCommandBuilder.sshExecutableURL,
+                arguments: ["-V"],
+                sensitiveValues: []
+            )
+        }
     }
 }
 
 // MARK: - NSViewRepresentable Terminal
 
 struct SSHTerminalView: NSViewRepresentable {
-    let executable: String
-    let args: [String]
+    let invocation: SSHInvocation
     let sessionName: String
     @ObservedObject var settings: TerminalSettings
+    var onPrepare: (@MainActor @Sendable () -> Void)? = nil
     var onConnect: (@MainActor @Sendable () -> Void)? = nil
 
     // Tracks last-applied values so updateNSView is a no-op when nothing changed
@@ -112,7 +116,12 @@ struct SSHTerminalView: NSViewRepresentable {
         applySettings(tv, coordinator: context.coordinator, force: true)
         tv.processDelegate = context.coordinator
         context.coordinator.sessionName = sessionName
-        tv.startProcess(executable: executable, args: args)
+        if let onPrepare {
+            Task { @MainActor in
+                onPrepare()
+            }
+        }
+        tv.startProcess(executable: invocation.executableURL.path, args: invocation.arguments)
         if let onConnect {
             Task { @MainActor in
                 onConnect()

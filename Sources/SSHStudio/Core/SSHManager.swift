@@ -5,11 +5,14 @@ class SSHManager: ObservableObject {
     // Tracks active tunnel processes keyed by tunnel config ID
     @Published private(set) var activeTunnels: [UUID: Process] = [:]
     @Published private(set) var tunnelErrors: [UUID: String] = [:]
+    @Published private(set) var tunnelStates: [UUID: SSHConnectionState] = [:]
     private var requestedTunnels: [UUID: (TunnelConfig, Session)] = [:]
     private var reconnectTasks: [UUID: Task<Void, Never>] = [:]
+    private var reconnectAttempts: [UUID: Int] = [:]
+    private let reconnectPolicy = SSHReconnectPolicy()
 
     func sshArgs(for session: Session) -> [String] {
-        SSHSecurity.destinationArgs(for: session)
+        (try? SSHCommandBuilder.terminalInvocation(for: session).arguments) ?? SSHSecurity.destinationArgs(for: session)
     }
 
     func startTunnel(tunnel: TunnelConfig, session: Session) {
@@ -23,9 +26,11 @@ class SSHManager: ObservableObject {
         requestedTunnels.removeValue(forKey: id)
         reconnectTasks[id]?.cancel()
         reconnectTasks[id] = nil
+        reconnectAttempts.removeValue(forKey: id)
         activeTunnels[id]?.terminate()
         activeTunnels.removeValue(forKey: id)
         tunnelErrors.removeValue(forKey: id)
+        tunnelStates[id] = .disconnected(Date(), exitStatus: nil)
     }
 
     func isTunnelActive(_ id: UUID) -> Bool {
@@ -46,35 +51,19 @@ class SSHManager: ObservableObject {
 
     private func launchTunnel(tunnel: TunnelConfig, session: Session) {
         guard activeTunnels[tunnel.id] == nil else { return }
+        tunnelStates[tunnel.id] = .preparing(Date())
+        let invocation: SSHInvocation
         do {
-            try SSHSecurity.validateNonInteractive(session: session, purpose: "SSH tunnels")
-            try SSHSecurity.validateTunnel(tunnel)
+            invocation = try SSHCommandBuilder.tunnelInvocation(for: tunnel, session: session)
         } catch {
             tunnelErrors[tunnel.id] = error.localizedDescription
+            tunnelStates[tunnel.id] = .failed(Date(), message: DiagnosticRedactor.redact(error.localizedDescription))
             return
         }
 
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
-
-        var args: [String] = [
-            "-N",
-            "-o", "ExitOnForwardFailure=yes",
-        ]
-
-        args += SSHSecurity.baseOptions
-        args += sshArgs(for: session)
-
-        switch tunnel.type {
-        case .local:
-            args.insert(contentsOf: ["-L", "\(tunnel.listenHost):\(tunnel.localPort):\(tunnel.remoteHost):\(tunnel.remotePort)"], at: 1)
-        case .remote:
-            args.insert(contentsOf: ["-R", "\(tunnel.listenHost):\(tunnel.remotePort):\(tunnel.remoteHost):\(tunnel.localPort)"], at: 1)
-        case .dynamic:
-            args.insert(contentsOf: ["-D", "\(tunnel.listenHost):\(tunnel.localPort)"], at: 1)
-        }
-
-        process.arguments = args
+        process.executableURL = invocation.executableURL
+        process.arguments = invocation.arguments
         let errorPipe = Pipe()
         let errorReader = PipeReader(pipe: errorPipe)
         process.standardError = errorPipe
@@ -98,11 +87,14 @@ class SSHManager: ObservableObject {
             try process.run()
             errorReader.start()
             activeTunnels[tunnel.id] = process
+            reconnectAttempts[tunnel.id] = 0
             tunnelErrors.removeValue(forKey: tunnel.id)
+            tunnelStates[tunnel.id] = .connected(Date())
             ConnectionLog.shared.log("Tunnel started: \(tunnel.nameOrFallback)", level: .success, session: session.name)
         } catch {
             let message = error.localizedDescription
             tunnelErrors[tunnel.id] = message
+            tunnelStates[tunnel.id] = .failed(Date(), message: DiagnosticRedactor.redact(message))
             ConnectionLog.shared.log("Tunnel failed: \(message)", level: .error, session: session.name)
             scheduleReconnectIfNeeded(id: tunnel.id)
         }
@@ -114,6 +106,7 @@ class SSHManager: ObservableObject {
         guard requestedTunnels[id] != nil else { return }
         let detail = message?.isEmpty == false ? message! : "ssh exited with status \(status)"
         tunnelErrors[id] = detail
+        tunnelStates[id] = .failed(Date(), message: DiagnosticRedactor.redact(detail))
         if let session = requestedTunnels[id]?.1 {
             ConnectionLog.shared.log("Tunnel disconnected: \(detail)", level: .warning, session: session.name)
         }
@@ -123,8 +116,16 @@ class SSHManager: ObservableObject {
     private func scheduleReconnectIfNeeded(id: UUID) {
         guard let (tunnel, session) = requestedTunnels[id], tunnel.autoReconnect else { return }
         reconnectTasks[id]?.cancel()
+        let nextAttempt = (reconnectAttempts[id] ?? 0) + 1
+        guard nextAttempt <= reconnectPolicy.maxAttempts else {
+            tunnelStates[id] = .failed(Date(), message: "Reconnect attempts exhausted")
+            return
+        }
+        reconnectAttempts[id] = nextAttempt
+        let delay = reconnectPolicy.delay(forAttempt: nextAttempt)
+        tunnelStates[id] = .reconnecting(attempt: nextAttempt, nextAttempt: Date().addingTimeInterval(delay))
         reconnectTasks[id] = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .seconds(3))
+            try? await Task.sleep(for: .seconds(delay))
             guard !Task.isCancelled, let self, self.requestedTunnels[id] != nil else { return }
             self.reconnectTasks[id] = nil
             self.launchTunnel(tunnel: tunnel, session: session)
