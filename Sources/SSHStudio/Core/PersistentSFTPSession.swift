@@ -54,6 +54,10 @@ final class PersistentSFTPSession: @unchecked Sendable {
     // MARK: - Connect
 
     func connect() async throws {
+        let allowed = await HostKeyVerificationGate.allowConnection(session: sshSession)
+        if case .failure(let error) = allowed {
+            throw error
+        }
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             queue.async { self._launch(cont: cont) }
         }
@@ -266,21 +270,6 @@ final class PersistentSFTPSession: @unchecked Sendable {
     }
 
     private func _buildArgs() -> [String] {
-        var args: [String] = [
-            "-B", SFTPManager.sftpBufferSize,
-            "-R", SFTPManager.sftpRequestCount,
-            "-o", "BatchMode=yes",
-            "-o", "ControlMaster=auto",
-            "-o", "ControlPath=\(SSHSecurity.controlPath(for: sshSession))",
-            "-o", "ControlPersist=10m",
-            "-o", "Compression=no",
-            "-o", "IPQoS=throughput"
-        ]
-        args += SSHSecurity.baseOptions
-        if sshSession.authMethod == .privateKey && !sshSession.privateKeyPath.isEmpty {
-            args += ["-o", "IdentitiesOnly=yes", "-i", sshSession.privateKeyPath]
-        }
-        args += ["-P", "\(sshSession.port)", SSHSecurity.connectionTarget(for: sshSession)]
-        return args
+        (try? SSHCommandBuilder.sftpInvocation(for: sshSession).arguments) ?? SSHSecurity.destinationArgs(for: sshSession)
     }
 }

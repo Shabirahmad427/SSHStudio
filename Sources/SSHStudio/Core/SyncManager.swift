@@ -74,16 +74,25 @@ class SyncManager: ObservableObject {
         }
 
         ConnectionLog.shared.log("Starting sync: \(localPath.lastPathComponent) <-> \(remotePath)", session: session.name)
-        do {
-            try process.run()
-            reader.start { data in
-                if let line = String(data: data, encoding: .utf8), !line.isEmpty {
-                    Task { @MainActor [weak self] in self?.syncLog.append(line) }
+        Task { @MainActor in
+            switch await HostKeyVerificationGate.allowConnection(session: session) {
+            case .success:
+                do {
+                    try process.run()
+                    reader.start { data in
+                        if let line = String(data: data, encoding: .utf8), !line.isEmpty {
+                            Task { @MainActor [weak self] in self?.syncLog.append(line) }
+                        }
+                    }
+                } catch {
+                    isSyncing = false
+                    syncLog.append("rsync not found. Install via: brew install rsync")
                 }
+            case .failure(let error):
+                isSyncing = false
+                syncLog.append(error.localizedDescription)
+                completion()
             }
-        } catch {
-            isSyncing = false
-            syncLog.append("rsync not found. Install via: brew install rsync")
         }
     }
 
@@ -158,23 +167,16 @@ class SyncManager: ObservableObject {
     private func runSSHWithStatus(session: Session, command: String,
                                   completion: @escaping @MainActor (Int32, String?) -> Void) {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+        let invocation: SSHInvocation
 
         do {
-            try SSHSecurity.validateNonInteractive(session: session, purpose: "Sync")
+            invocation = try SSHCommandBuilder.remoteCommandInvocation(for: session, command: command, purpose: .sync)
         } catch {
             completion(255, error.localizedDescription)
             return
         }
-
-        var args = ["-o", "BatchMode=yes",
-                    "-o", "ControlMaster=auto",
-                    "-o", "ControlPath=\(SSHSecurity.controlPath(for: session))",
-                    "-o", "ControlPersist=10m"]
-        args += SSHSecurity.baseOptions
-        args += SSHSecurity.destinationArgs(for: session)
-        args.append(command)
-        process.arguments = args
+        process.executableURL = invocation.executableURL
+        process.arguments = invocation.arguments
 
         let pipe = Pipe()
         let reader = PipeReader(pipe: pipe)
@@ -190,13 +192,20 @@ class SyncManager: ObservableObject {
             }
         }
 
-        do {
-            try process.run()
-            reader.start { data in
-                output.append(data)
+        Task { @MainActor in
+            switch await HostKeyVerificationGate.allowConnection(session: session) {
+            case .success:
+                do {
+                    try process.run()
+                    reader.start { data in
+                        output.append(data)
+                    }
+                } catch {
+                    completion(255, error.localizedDescription)
+                }
+            case .failure(let error):
+                completion(255, error.localizedDescription)
             }
-        } catch {
-            completion(255, error.localizedDescription)
         }
     }
 

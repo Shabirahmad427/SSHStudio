@@ -1542,30 +1542,39 @@ class SFTPManager: ObservableObject {
             }
         }
 
-        do {
-            try process.run()
-            reader.start { data in
-                for line in output.consume(data) {
-                    Task { @MainActor in
-                        SFTPManager.parseRsyncLine(line, into: item)
-                        SFTPManager.recordSFTPEvent(line, into: item, session: session)
-                        if let detail = SFTPManager.sftpTransferDetail(from: line) {
-                            item.addDetailLine(detail)
+        Task { @MainActor in
+            switch await HostKeyVerificationGate.allowConnection(session: session) {
+            case .success:
+                do {
+                    try process.run()
+                    reader.start { data in
+                        for line in output.consume(data) {
+                            Task { @MainActor in
+                                SFTPManager.parseRsyncLine(line, into: item)
+                                SFTPManager.recordSFTPEvent(line, into: item, session: session)
+                                if let detail = SFTPManager.sftpTransferDetail(from: line) {
+                                    item.addDetailLine(detail)
+                                }
+                            }
                         }
                     }
+                } catch {
+                    try? FileManager.default.removeItem(at: batchURL)
+                    item.status = .failed(error.localizedDescription)
+                    ConnectionLog.shared.log(
+                        "\(Self.transferTitle(for: item.direction)) failed for \(item.name): \(error.localizedDescription)",
+                        level: .error,
+                        session: session.name
+                    )
+                    if let fallback {
+                        fallback()
+                    } else {
+                        completion?(false)
+                    }
                 }
-            }
-        } catch {
-            try? FileManager.default.removeItem(at: batchURL)
-            item.status = .failed(error.localizedDescription)
-            ConnectionLog.shared.log(
-                "\(Self.transferTitle(for: item.direction)) failed for \(item.name): \(error.localizedDescription)",
-                level: .error,
-                session: session.name
-            )
-            if let fallback {
-                fallback()
-            } else {
+            case .failure(let error):
+                try? FileManager.default.removeItem(at: batchURL)
+                item.status = .failed(error.localizedDescription)
                 completion?(false)
             }
         }
@@ -1629,19 +1638,28 @@ class SFTPManager: ObservableObject {
             }
         }
 
-        do {
-            try process.run()
-            reader.start { data in
-                for line in output.consume(data) {
-                    Task { @MainActor in
-                        SFTPManager.recordRsyncEvent(line, into: item)
+        Task { @MainActor in
+            switch await HostKeyVerificationGate.allowConnection(session: session) {
+            case .success:
+                do {
+                    try process.run()
+                    reader.start { data in
+                        for line in output.consume(data) {
+                            Task { @MainActor in
+                                SFTPManager.recordRsyncEvent(line, into: item)
+                            }
+                        }
                     }
+                } catch {
+                    item.status = .failed(error.localizedDescription)
+                    item.clearProcess()
+                    completion?(false)
                 }
+            case .failure(let error):
+                item.status = .failed(error.localizedDescription)
+                item.clearProcess()
+                completion?(false)
             }
-        } catch {
-            item.status = .failed(error.localizedDescription)
-            item.clearProcess()
-            completion?(false)
         }
     }
 
@@ -1799,25 +1817,7 @@ class SFTPManager: ObservableObject {
     }
 
     private static func sftpArguments(for session: Session, batchURL: URL) -> [String] {
-        var args = [
-            "-B", sftpBufferSize,
-            "-R", sftpRequestCount,
-            "-b", batchURL.path,
-            "-o", "BatchMode=yes",
-            "-o", "ControlMaster=auto",
-            "-o", "ControlPath=\(SSHSecurity.controlPath(for: session))",
-            "-o", "ControlPersist=10m",
-            "-o", "Compression=no",
-            "-o", "IPQoS=throughput"
-        ]
-        args += SSHSecurity.baseOptions
-
-        if session.authMethod == .privateKey && !session.privateKeyPath.isEmpty {
-            args += ["-o", "IdentitiesOnly=yes", "-i", session.privateKeyPath]
-        }
-
-        args += ["-P", "\(session.port)", SSHSecurity.connectionTarget(for: session)]
-        return args
+        (try? SSHCommandBuilder.sftpInvocation(for: session, batchURL: batchURL).arguments) ?? []
     }
 
     private static func sftpLocalPath(_ value: String) -> String {
@@ -1918,23 +1918,16 @@ class SFTPManager: ObservableObject {
 
     private func runSSHWithStatus(session: Session, command: String, completion: @escaping @MainActor (Int32, String?) -> Void) {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+        let invocation: SSHInvocation
 
         do {
-            try SSHSecurity.validateNonInteractive(session: session, purpose: "SFTP browsing")
+            invocation = try SSHCommandBuilder.remoteCommandInvocation(for: session, command: command, purpose: .sftp)
         } catch {
             completion(255, error.localizedDescription)
             return
         }
-
-        var args = ["-o", "BatchMode=yes",
-                    "-o", "ControlMaster=auto",
-                    "-o", "ControlPath=\(SSHSecurity.controlPath(for: session))",
-                    "-o", "ControlPersist=10m"]
-        args += SSHSecurity.baseOptions
-        args += SSHSecurity.destinationArgs(for: session)
-        args.append(command)
-        process.arguments = args
+        process.executableURL = invocation.executableURL
+        process.arguments = invocation.arguments
 
         let pipe = Pipe()
         let reader = PipeReader(pipe: pipe)
@@ -1950,11 +1943,18 @@ class SFTPManager: ObservableObject {
             }
         }
 
-        do {
-            try process.run()
-            reader.start()
-        } catch {
-            Task { @MainActor in completion(255, nil) }
+        Task { @MainActor in
+            switch await HostKeyVerificationGate.allowConnection(session: session) {
+            case .success:
+                do {
+                    try process.run()
+                    reader.start()
+                } catch {
+                    completion(255, nil)
+                }
+            case .failure(let error):
+                completion(255, error.localizedDescription)
+            }
         }
     }
 

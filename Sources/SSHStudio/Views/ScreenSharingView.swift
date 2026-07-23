@@ -347,21 +347,20 @@ private final class ScreenSharingTunnelManager: ObservableObject {
 
         stop(sessionID: session.id)
         let localPort = Int.random(in: 49152...65535)
+        switch await HostKeyVerificationGate.allowConnection(session: session) {
+        case .success:
+            break
+        case .failure(let error):
+            throw ScreenSharingTunnelError.unavailable(error.localizedDescription)
+        }
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
-
-        var args = [
-            "-N",
-            "-o", "ExitOnForwardFailure=yes",
-            "-o", "ConnectTimeout=8",
-            "-o", "BatchMode=yes",
-            "-o", "ControlMaster=no",
-            "-o", "ControlPath=\(SSHSecurity.controlPath(for: session))",
-            "-L", "127.0.0.1:\(localPort):\(displayHost):\(session.screenSharingPort)"
-        ]
-        args += SSHSecurity.baseOptions
-        args += SSHSecurity.destinationArgs(for: session)
-        process.arguments = args
+        let invocation = try SSHCommandBuilder.screenSharingTunnelInvocation(
+            session: session,
+            displayHost: displayHost,
+            localPort: localPort
+        )
+        process.executableURL = invocation.executableURL
+        process.arguments = invocation.arguments
 
         let errorPipe = Pipe()
         let errorReader = PipeReader(pipe: errorPipe)
