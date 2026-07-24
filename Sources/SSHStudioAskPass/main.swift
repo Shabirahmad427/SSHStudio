@@ -15,6 +15,7 @@ enum AskPassError: Error {
 }
 
 let arguments = CommandLine.arguments.dropFirst()
+let referenceEnvironmentKey = "SSHSTUDIO_ASKPASS_REFERENCE"
 
 func classifyPrompt(_ prompt: String) throws -> PromptKind {
     let lower = prompt.lowercased()
@@ -40,9 +41,11 @@ func readCredential(reference: String) throws -> Data {
 }
 
 do {
-    guard arguments.count >= 2 else { throw AskPassError.invalidArguments }
-    let reference = String(arguments[arguments.startIndex])
-    let prompt = arguments.dropFirst().joined(separator: " ")
+    guard arguments.count >= 1 else { throw AskPassError.invalidArguments }
+    guard let reference = ProcessInfo.processInfo.environment[referenceEnvironmentKey] else {
+        throw AskPassError.invalidReference
+    }
+    let prompt = arguments.joined(separator: " ")
     _ = try classifyPrompt(prompt)
     let secret = try readCredential(reference: reference)
     FileHandle.standardOutput.write(secret)

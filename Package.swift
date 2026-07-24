@@ -12,15 +12,7 @@ let package = Package(
             name: "SSHStudio",
             dependencies: ["SwiftTerm"],
             path: "Sources/SSHStudio",
-            exclude: ["Resources"],
-            linkerSettings: [
-                .unsafeFlags([
-                    "-Xlinker", "-sectcreate",
-                    "-Xlinker", "__TEXT",
-                    "-Xlinker", "__info_plist",
-                    "-Xlinker", "Sources/SSHStudio/Resources/Info.plist",
-                ]),
-            ],
+            exclude: ["Resources"]
         ),
         .executableTarget(
             name: "SSHStudioAskPass",

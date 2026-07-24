@@ -56,6 +56,30 @@ struct Phase5AuthenticationTests {
         #expect(invocation.arguments.contains("AddKeysToAgent=yes"))
     }
 
+    @Test func passwordCredentialInvocationUsesPackagedAskPassEnvironment() throws {
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sshstudio-askpass-\(UUID().uuidString)", isDirectory: true)
+        let bundle = temporary.appendingPathComponent("SSH Studio.app", isDirectory: true)
+        let helper = AskPassSupport.helperURL(in: bundle)
+        try FileManager.default.createDirectory(
+            at: helper.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("#!/bin/sh\nexit 1\n".utf8).write(to: helper)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: helper.path)
+        defer { try? FileManager.default.removeItem(at: temporary) }
+
+        let reference = UUID().uuidString
+        let environment = try AskPassSupport.environment(
+            credentialReferenceID: reference,
+            appBundleURL: bundle
+        )
+
+        #expect(environment["SSH_ASKPASS"] == helper.path)
+        #expect(environment["SSH_ASKPASS_REQUIRE"] == "force")
+        #expect(environment[AskPassSupport.credentialReferenceEnvironmentKey] == reference)
+    }
+
     @Test func credentialReferenceLifecycleAndDuplicationAvoidSecretCopy() throws {
         let store = InMemoryCredentialStore()
         let reference = try store.create(CredentialSecret(string: "sample"), label: "Fixture")

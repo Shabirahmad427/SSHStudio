@@ -208,7 +208,11 @@ struct SSHTerminalView: NSViewRepresentable {
             if let verifyHost {
                 guard await verifyHost() else { return }
             }
-            tv.startProcess(executable: invocation.executableURL.path, args: invocation.arguments)
+            tv.startProcess(
+                executable: invocation.executableURL.path,
+                args: invocation.arguments,
+                environment: terminalEnvironment(for: invocation)
+            )
             if let onConnect {
                 onConnect()
             }
@@ -263,6 +267,17 @@ struct SSHTerminalView: NSViewRepresentable {
             coordinator.appliedCursor     = newCursor
             coordinator.appliedSelection  = newSelect
         }
+    }
+
+    private func terminalEnvironment(for invocation: SSHInvocation) -> [String]? {
+        guard !invocation.environment.isEmpty else { return nil }
+        var environment = ProcessInfo.processInfo.environment
+        invocation.environment.forEach { key, value in
+            environment[key] = value
+        }
+        return environment
+            .map { "\($0.key)=\($0.value)" }
+            .sorted()
     }
 }
 

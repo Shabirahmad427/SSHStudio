@@ -70,6 +70,7 @@ struct SSHInvocation: Equatable {
     let arguments: [String]
     let hostKeyPolicy: SSHHostKeyPolicy
     let sensitiveValues: [String]
+    var environment: [String: String] = [:]
 
     var redactedArguments: [String] {
         DiagnosticRedactor.redactedArguments(arguments, sensitiveValues: sensitiveValues)
@@ -104,12 +105,14 @@ enum SSHCommandBuilder {
         args += ["-o", "Compression=no"]
         args += ["-o", "RequestTTY=yes"]
         args += destinationArgs(for: session)
+        let environment = terminalEnvironment(for: session)
         return SSHInvocation(
             purpose: .terminal,
             executableURL: sshExecutableURL,
             arguments: args,
             hostKeyPolicy: hostKeyPolicy,
-            sensitiveValues: sensitiveValues(for: session)
+            sensitiveValues: sensitiveValues(for: session),
+            environment: environment
         )
     }
 
@@ -281,6 +284,13 @@ enum SSHCommandBuilder {
         case .sshConfigManaged, .passwordCredential:
             return []
         }
+    }
+
+    static func terminalEnvironment(for session: Session) -> [String: String] {
+        guard case .passwordCredential(let referenceID) = session.authentication else {
+            return [:]
+        }
+        return (try? AskPassSupport.environment(credentialReferenceID: referenceID)) ?? [:]
     }
 
     static func connectionTarget(for session: Session) -> String {

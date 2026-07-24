@@ -10,6 +10,7 @@ enum AskPassValidationError: LocalizedError, Equatable {
     case helperOutsideBundle
     case helperWritableByGroupOrOther
     case invalidPrompt
+    case invalidCredentialReference
 
     var errorDescription: String? {
         switch self {
@@ -17,12 +18,14 @@ enum AskPassValidationError: LocalizedError, Equatable {
         case .helperOutsideBundle: return "AskPass helper is outside the application bundle."
         case .helperWritableByGroupOrOther: return "AskPass helper permissions are too permissive."
         case .invalidPrompt: return "AskPass prompt is not supported."
+        case .invalidCredentialReference: return "AskPass credential reference is invalid."
         }
     }
 }
 
 enum AskPassSupport {
     static let helperName = "SSHStudioAskPass"
+    static let credentialReferenceEnvironmentKey = "SSHSTUDIO_ASKPASS_REFERENCE"
 
     static func classify(prompt: String) throws -> AskPassPromptKind {
         let lower = prompt.lowercased()
@@ -52,5 +55,21 @@ enum AskPassSupport {
             .appendingPathComponent("Contents", isDirectory: true)
             .appendingPathComponent("Helpers", isDirectory: true)
             .appendingPathComponent(helperName)
+    }
+
+    static func environment(
+        credentialReferenceID: String,
+        appBundleURL: URL = Bundle.main.bundleURL
+    ) throws -> [String: String] {
+        guard UUID(uuidString: credentialReferenceID) != nil else {
+            throw AskPassValidationError.invalidCredentialReference
+        }
+        let helper = helperURL(in: appBundleURL)
+        try validateHelper(at: helper, appBundleURL: appBundleURL)
+        return [
+            "SSH_ASKPASS": helper.path,
+            "SSH_ASKPASS_REQUIRE": "force",
+            credentialReferenceEnvironmentKey: credentialReferenceID
+        ]
     }
 }
