@@ -5,12 +5,16 @@ struct TerminalTabView: View {
     let session: Session
     @ObservedObject private var termSettings = TerminalSettings.shared
     @EnvironmentObject private var connectionService: SSHConnectionService
+    @EnvironmentObject private var terminalController: TerminalSessionController
     @EnvironmentObject private var hostKeyModel: HostKeyVerificationModel
     @State private var connectionNotice: String?
 
     var body: some View {
         ZStack {
             terminalStack
+            if terminalController.isFindVisible {
+                terminalFindBar
+            }
             if let connectionNotice {
                 VStack {
                     HStack {
@@ -38,7 +42,7 @@ struct TerminalTabView: View {
             let exitLabel = exitCode.map { "SSH exited with code \($0)" } ?? "SSH disconnected"
             let details = tail.isEmpty ? exitLabel : "\(exitLabel): \(tail)"
             connectionNotice = details
-            connectionService.processTerminated(exitStatus: exitCode, message: tail)
+            terminalController.processExited(exitStatus: exitCode, message: tail)
             ConnectionLog.shared.log(details, level: .error, session: session.name)
         }
     }
@@ -50,6 +54,7 @@ struct TerminalTabView: View {
                 invocation: terminalInvocation(for: session),
                 sessionName: session.name,
                 settings: termSettings,
+                controller: terminalController,
                 verifyHost: {
                     await verifyHostBeforeConnect()
                 },
@@ -58,12 +63,56 @@ struct TerminalTabView: View {
                 },
                 onConnect: {
                     connectionNotice = nil
-                    connectionService.processStarted()
+                    terminalController.processStarted()
                     ConnectionLog.shared.log("SSH process started", level: .info, session: session.name)
                 }
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color(termSettings.resolvedBackground))
+        }
+    }
+
+    private var terminalFindBar: some View {
+        VStack {
+            HStack(spacing: SSHStudioSpacing.sm) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(.secondary)
+                TextField("Find in terminal", text: $terminalController.findText)
+                    .textFieldStyle(.plain)
+                    .onSubmit { terminalController.findNext() }
+                Button {
+                    terminalController.findPrevious()
+                } label: {
+                    Image(systemName: "chevron.up")
+                }
+                .buttonStyle(.borderless)
+                .help("Previous Match")
+                Button {
+                    terminalController.findNext()
+                } label: {
+                    Image(systemName: "chevron.down")
+                }
+                .buttonStyle(.borderless)
+                .help("Next Match")
+                Button {
+                    terminalController.closeFind()
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.borderless)
+                .help("Close Find")
+            }
+            .controlSize(.small)
+            .padding(.horizontal, SSHStudioSpacing.sm)
+            .frame(width: 360, height: 34)
+            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: SSHStudioMetrics.controlCornerRadius))
+            .overlay {
+                RoundedRectangle(cornerRadius: SSHStudioMetrics.controlCornerRadius)
+                    .strokeBorder(SSHStudioColors.separator.opacity(0.7), lineWidth: 1)
+            }
+            .padding(SSHStudioSpacing.md)
+            .frame(maxWidth: .infinity, alignment: .trailing)
+            Spacer()
         }
     }
 
@@ -120,6 +169,7 @@ struct SSHTerminalView: NSViewRepresentable {
     let invocation: SSHInvocation
     let sessionName: String
     @ObservedObject var settings: TerminalSettings
+    @ObservedObject var controller: TerminalSessionController
     var verifyHost: (@MainActor @Sendable () async -> Bool)? = nil
     var onPrepare: (@MainActor @Sendable () -> Void)? = nil
     var onConnect: (@MainActor @Sendable () -> Void)? = nil
@@ -135,15 +185,20 @@ struct SSHTerminalView: NSViewRepresentable {
         var appliedCursor: NSColor = .white
         var appliedSelection: NSColor = .blue
         var sessionName: String = ""
+        weak var controller: TerminalSessionController?
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeNSView(context: Context) -> LocalProcessTerminalView {
         let tv = StudioTerminalView(frame: .zero)
+        tv.controller = controller
         applySettings(tv, coordinator: context.coordinator, force: true)
         tv.processDelegate = context.coordinator
         context.coordinator.sessionName = sessionName
+        context.coordinator.controller = controller
+        controller.attach(processHandle: tv)
+        guard controller.beginStart() else { return tv }
         if let onPrepare {
             Task { @MainActor in
                 onPrepare()
@@ -164,6 +219,13 @@ struct SSHTerminalView: NSViewRepresentable {
     func updateNSView(_ nsView: LocalProcessTerminalView, context: Context) {
         applySettings(nsView, coordinator: context.coordinator, force: false)
         context.coordinator.sessionName = sessionName
+        context.coordinator.controller = controller
+    }
+
+    static func dismantleNSView(_ nsView: LocalProcessTerminalView, coordinator: Coordinator) {
+        if let handle = nsView as? StudioTerminalView {
+            coordinator.controller?.detach(processHandle: handle)
+        }
     }
 
     private func applySettings(_ tv: LocalProcessTerminalView, coordinator: Coordinator, force: Bool) {
@@ -239,6 +301,8 @@ extension Notification.Name {
 }
 
 final class StudioTerminalView: LocalProcessTerminalView {
+    weak var controller: TerminalSessionController?
+
     override func menu(for event: NSEvent) -> NSMenu? {
         let menu = NSMenu()
 
@@ -298,5 +362,41 @@ final class StudioTerminalView: LocalProcessTerminalView {
         let expanded = (selection as NSString).expandingTildeInPath
         guard FileManager.default.fileExists(atPath: expanded) else { return nil }
         return URL(fileURLWithPath: expanded)
+    }
+}
+
+extension StudioTerminalView: TerminalProcessControlling {
+    var isRunning: Bool {
+        process?.running == true
+    }
+
+    var processIdentifier: pid_t {
+        process?.shellPid ?? 0
+    }
+
+    func terminateGracefully() {
+        terminate()
+    }
+
+    func forceTerminate() {
+        let pid = processIdentifier
+        guard pid > 0 else { return }
+        kill(pid, SIGKILL)
+    }
+
+    func focusTerminal() {
+        window?.makeFirstResponder(self)
+    }
+
+    func findNext(_ term: String) -> Bool {
+        super.findNext(term)
+    }
+
+    func findPrevious(_ term: String) -> Bool {
+        super.findPrevious(term)
+    }
+
+    func clearFind() {
+        clearSearch()
     }
 }

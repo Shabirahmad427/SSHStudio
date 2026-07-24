@@ -14,6 +14,7 @@ struct AppShellView: View {
     @AppStorage("app_shell_column_visibility") private var storedColumnVisibility = "all"
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var showAddSession = false
+    @State private var pendingClose: OpenSession?
 
     var selectedOpen: OpenSession? {
         openSessions.first { $0.id == selectedOpenID }
@@ -41,7 +42,7 @@ struct AppShellView: View {
                 sshManager: sshManager,
                 openSessions: openSessions,
                 selectedOpenID: $selectedOpenID,
-                onClose: closeSession,
+                onClose: requestCloseSession,
                 onDuplicate: duplicateSession,
                 onQuickConnect: { showQuickConnect = true }
             )
@@ -70,13 +71,30 @@ struct AppShellView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .closeSSHStudioActiveTab)) { _ in
             guard let selectedOpen else { return }
-            closeSession(selectedOpen)
+            requestCloseSession(selectedOpen)
         }
         .onReceive(NotificationCenter.default.publisher(for: .selectSSHStudioNextTab)) { _ in
             selectOpenSession(offset: 1)
         }
         .onReceive(NotificationCenter.default.publisher(for: .selectSSHStudioPreviousTab)) { _ in
             selectOpenSession(offset: -1)
+        }
+        .confirmationDialog(
+            "Close this workspace?",
+            isPresented: Binding(
+                get: { pendingClose != nil },
+                set: { if !$0 { pendingClose = nil } }
+            ),
+            presenting: pendingClose
+        ) { open in
+            Button("Disconnect and Close", role: .destructive) {
+                open.terminalController.disconnect()
+                closeSession(open)
+                pendingClose = nil
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { open in
+            Text(closeMessage(for: open))
         }
     }
 
@@ -95,6 +113,40 @@ struct AppShellView: View {
         openSessions.removeAll { $0.id == open.id }
         if selectedOpenID == open.id {
             selectedOpenID = openSessions.last?.id
+        }
+    }
+
+    private func requestCloseSession(_ open: OpenSession) {
+        switch open.terminalController.closePolicy(
+            transferCount: TransferQueue.shared.activeCount,
+            tunnelCount: open.session.tunnels.count
+        ) {
+        case .closeImmediately:
+            closeSession(open)
+        case .confirmDisconnect:
+            pendingClose = open
+        }
+    }
+
+    private func closeMessage(for open: OpenSession) -> String {
+        switch open.terminalController.closePolicy(
+            transferCount: TransferQueue.shared.activeCount,
+            tunnelCount: open.session.tunnels.count
+        ) {
+        case .closeImmediately:
+            return "This workspace can be closed immediately."
+        case .confirmDisconnect(let transferCount, let tunnelCount, let reconnecting):
+            var parts = ["Closing will disconnect the terminal process owned by this tab."]
+            if reconnecting {
+                parts.append("A pending reconnect will be cancelled.")
+            }
+            if transferCount > 0 {
+                parts.append("\(transferCount) active transfer\(transferCount == 1 ? "" : "s") may be interrupted.")
+            }
+            if tunnelCount > 0 {
+                parts.append("\(tunnelCount) configured tunnel\(tunnelCount == 1 ? "" : "s") belong to this profile.")
+            }
+            return parts.joined(separator: " ")
         }
     }
 

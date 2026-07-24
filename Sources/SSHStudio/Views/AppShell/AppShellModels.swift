@@ -12,7 +12,12 @@ extension Notification.Name {
     static let duplicateSSHStudioActiveTab = Notification.Name("duplicateSSHStudioActiveTab")
     static let closeSSHStudioActiveTab = Notification.Name("closeSSHStudioActiveTab")
     static let reconnectSSHStudioActiveSession = Notification.Name("reconnectSSHStudioActiveSession")
+    static let disconnectSSHStudioActiveSession = Notification.Name("disconnectSSHStudioActiveSession")
     static let cancelSSHStudioReconnect = Notification.Name("cancelSSHStudioReconnect")
+    static let findSSHStudioTerminal = Notification.Name("findSSHStudioTerminal")
+    static let findNextSSHStudioTerminal = Notification.Name("findNextSSHStudioTerminal")
+    static let findPreviousSSHStudioTerminal = Notification.Name("findPreviousSSHStudioTerminal")
+    static let closeFindSSHStudioTerminal = Notification.Name("closeFindSSHStudioTerminal")
     static let selectSSHStudioNextTab = Notification.Name("selectSSHStudioNextTab")
     static let selectSSHStudioPreviousTab = Notification.Name("selectSSHStudioPreviousTab")
     static let increaseSSHStudioTerminalFont = Notification.Name("increaseSSHStudioTerminalFont")
@@ -70,9 +75,11 @@ final class OpenSession: Identifiable, ObservableObject {
     @Published var activeTab: SessionTab = .terminal
     let sftpManager = SFTPManager()
     let connectionService = SSHConnectionService()
+    let terminalController: TerminalSessionController
     let sftpLocalHistory = NavigationHistory<URL>(initial: URL(fileURLWithPath: NSHomeDirectory()))
 
     init(session: Session) {
         self.session = session
+        self.terminalController = TerminalSessionController(connectionService: connectionService)
     }
 }

@@ -122,11 +122,18 @@ struct ContentView: View {
                 .help("New Connection")
 
                 Button {
-                    NotificationCenter.default.post(name: .reconnectSSHStudioActiveSession, object: nil)
+                    if selectedOpen?.connectionService.state.isActive == true {
+                        NotificationCenter.default.post(name: .disconnectSSHStudioActiveSession, object: nil)
+                    } else {
+                        NotificationCenter.default.post(name: .reconnectSSHStudioActiveSession, object: nil)
+                    }
                 } label: {
-                    Label("Reconnect", systemImage: "arrow.clockwise")
+                    Label(
+                        selectedOpen?.connectionService.state.isActive == true ? "Disconnect" : "Reconnect",
+                        systemImage: selectedOpen?.connectionService.state.isActive == true ? "stop.circle" : "arrow.clockwise"
+                    )
                 }
-                .help("Reconnect Active Session")
+                .help(selectedOpen?.connectionService.state.isActive == true ? "Disconnect Active Session" : "Reconnect Active Session")
                 .disabled(selectedOpen == nil)
 
                 Button {

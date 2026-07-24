@@ -191,6 +191,7 @@ struct SessionDetailWrapper: View {
             activeTab: $open.activeTab,
             sftpManager: open.sftpManager,
             connectionService: open.connectionService,
+            terminalController: open.terminalController,
             sftpLocalHistory: open.sftpLocalHistory,
             allSessions: store.sessions,
             isSelected: isSelected
@@ -204,6 +205,7 @@ struct SessionDetailView: View {
     @Binding var activeTab: SessionTab
     @ObservedObject var sftpManager: SFTPManager
     @ObservedObject var connectionService: SSHConnectionService
+    @ObservedObject var terminalController: TerminalSessionController
     @ObservedObject var sftpLocalHistory: NavigationHistory<URL>
     let allSessions: [Session]
     let isSelected: Bool
@@ -214,6 +216,7 @@ struct SessionDetailView: View {
             ZStack {
                 TerminalTabView(session: session)
                     .environmentObject(connectionService)
+                    .environmentObject(terminalController)
                     .environmentObject(HostKeyVerificationModel.shared)
                     .id(terminalInstanceID)
                     .opacity(activeTab == .terminal ? 1 : 0)
@@ -261,16 +264,37 @@ struct SessionDetailView: View {
                 guard isSelected else { return }
                 terminalInstanceID = UUID()
             }
+            .onReceive(NotificationCenter.default.publisher(for: .disconnectSSHStudioActiveSession)) { _ in
+                guard isSelected else { return }
+                terminalController.disconnect()
+            }
             .onReceive(NotificationCenter.default.publisher(for: .cancelSSHStudioReconnect)) { _ in
                 guard isSelected else { return }
-                connectionService.cancelReconnect()
+                terminalController.cancelReconnect()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .findSSHStudioTerminal)) { _ in
+                guard isSelected, activeTab == .terminal else { return }
+                terminalController.showFind()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .findNextSSHStudioTerminal)) { _ in
+                guard isSelected, activeTab == .terminal else { return }
+                terminalController.findNext()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .findPreviousSSHStudioTerminal)) { _ in
+                guard isSelected, activeTab == .terminal else { return }
+                terminalController.findPrevious()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .closeFindSSHStudioTerminal)) { _ in
+                guard isSelected, activeTab == .terminal else { return }
+                terminalController.closeFind()
             }
 
             WorkspaceStatusBar(
                 session: session,
                 connectionService: connectionService,
                 onReconnect: { terminalInstanceID = UUID() },
-                onCancelReconnect: { connectionService.cancelReconnect() }
+                onDisconnect: { terminalController.disconnect() },
+                onCancelReconnect: { terminalController.cancelReconnect() }
             )
         }
     }

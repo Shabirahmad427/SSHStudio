@@ -86,9 +86,35 @@ struct SSHStudioApp: App {
                 }
                 .keyboardShortcut("r", modifiers: [.command, .shift])
 
+                Button("Disconnect") {
+                    NotificationCenter.default.post(name: .disconnectSSHStudioActiveSession, object: nil)
+                }
+                .keyboardShortcut(".", modifiers: .command)
+
                 Button("Cancel Reconnect") {
                     NotificationCenter.default.post(name: .cancelSSHStudioReconnect, object: nil)
                 }
+            }
+            CommandMenu("Terminal") {
+                Button("Find") {
+                    NotificationCenter.default.post(name: .findSSHStudioTerminal, object: nil)
+                }
+                .keyboardShortcut("f", modifiers: .command)
+
+                Button("Find Next") {
+                    NotificationCenter.default.post(name: .findNextSSHStudioTerminal, object: nil)
+                }
+                .keyboardShortcut("g", modifiers: .command)
+
+                Button("Find Previous") {
+                    NotificationCenter.default.post(name: .findPreviousSSHStudioTerminal, object: nil)
+                }
+                .keyboardShortcut("g", modifiers: [.command, .shift])
+
+                Button("Close Find") {
+                    NotificationCenter.default.post(name: .closeFindSSHStudioTerminal, object: nil)
+                }
+                .keyboardShortcut(.escape, modifiers: [])
             }
             CommandMenu("Appearance") {
                 ForEach(AppAppearance.allCases, id: \.self) { option in

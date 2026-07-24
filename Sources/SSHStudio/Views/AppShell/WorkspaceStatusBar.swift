@@ -4,6 +4,7 @@ struct WorkspaceStatusBar: View {
     let session: Session
     @ObservedObject var connectionService: SSHConnectionService
     var onReconnect: () -> Void
+    var onDisconnect: () -> Void
     var onCancelReconnect: () -> Void
     @ObservedObject private var queue = TransferQueue.shared
     @ObservedObject private var log = ConnectionLog.shared
@@ -26,6 +27,7 @@ struct WorkspaceStatusBar: View {
                     .lineLimit(1)
             }
             reconnectControls
+            disconnectControl
 
             if queue.activeCount > 0 {
                 Divider().frame(height: 12)
@@ -70,6 +72,17 @@ struct WorkspaceStatusBar: View {
             .help("Cancel Reconnect")
         default:
             EmptyView()
+        }
+    }
+
+    @ViewBuilder
+    private var disconnectControl: some View {
+        if connectionService.state.isActive {
+            Button(action: onDisconnect) {
+                Image(systemName: "stop.circle")
+            }
+            .buttonStyle(.plain)
+            .help("Disconnect")
         }
     }
 }
