@@ -1,0 +1,11 @@
+{
+  "bundleIdentifier": "com.sshstudio.app",
+  "bundleName": "SSH Studio",
+  "bundleDisplayName": "SSH Studio",
+  "executableName": "SSHStudio",
+  "shortVersion": "1.0.0",
+  "buildNumber": "5",
+  "minimumMacOSVersion": "14.0",
+  "iconFile": "SSHStudio.icns",
+  "copyright": "Copyright © 2026 SSH Studio. All rights reserved."
+}
