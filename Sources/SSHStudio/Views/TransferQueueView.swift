@@ -324,7 +324,7 @@ struct TransferRowView: View {
         case .failed:             return "xmark"
         case .cancelled:          return "slash.circle"
         case .skipped:            return "forward.end.circle"
-        case .inProgress, .queued:
+        case .preparing, .inProgress, .queued:
             switch item.direction {
             case .upload: return "arrow.up"
             case .download: return "arrow.down"

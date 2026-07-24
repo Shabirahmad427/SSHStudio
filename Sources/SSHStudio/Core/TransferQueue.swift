@@ -4,6 +4,7 @@ import Combine
 enum TransferDirection { case upload, download, serverToServer }
 enum TransferStatus {
     case queued
+    case preparing
     case inProgress
     case completed
     case failed(String)
@@ -60,6 +61,7 @@ class TransferItem: Identifiable, ObservableObject, @unchecked Sendable {
     var statusLabel: String {
         switch status {
         case .queued:        return "Queued"
+        case .preparing:     return "Preparing"
         case .inProgress:    return "Transferring…"
         case .completed:
             let elapsed = startedAt.map { Date().timeIntervalSince($0) } ?? 0
