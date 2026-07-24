@@ -9,11 +9,17 @@ protocol HostKeyVerificationServicing: Sendable {
 actor HostKeyVerificationService: HostKeyVerificationServicing {
     private let store: HostKeyStore
     private let discovery: HostKeyDiscovery
+    private let configResolver: SSHConfigResolving
     private var activeChecks: [String: Task<SSHHostTrustState, Never>] = [:]
 
-    init(store: HostKeyStore = ManagedHostKeyStore(), discovery: HostKeyDiscovery = SSHKeyscanProcessAdapter()) {
+    init(
+        store: HostKeyStore = ManagedHostKeyStore(),
+        discovery: HostKeyDiscovery = SSHKeyscanProcessAdapter(),
+        configResolver: SSHConfigResolving = OpenSSHConfigResolver()
+    ) {
         self.store = store
         self.discovery = discovery
+        self.configResolver = configResolver
     }
 
     func evaluate(endpoint: SSHHostEndpoint) async -> SSHHostTrustState {
@@ -43,6 +49,11 @@ actor HostKeyVerificationService: HostKeyVerificationServicing {
 
     private func evaluateUncoalesced(endpoint: SSHHostEndpoint) async -> SSHHostTrustState {
         do {
+            if let resolution = await configResolver.resolve(host: endpoint.hostname),
+               resolution.requiresOpenSSHManagedVerification {
+                return .trustedByOpenSSHConfiguration
+            }
+
             let stored = try await store.lookup(endpoint: endpoint)
             if stored.contains(where: { $0.source == .system }) {
                 return .trustedBySystem

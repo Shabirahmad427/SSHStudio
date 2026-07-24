@@ -5,7 +5,7 @@ enum HostKeyVerificationGate {
     static func allowConnection(session: Session) async -> Result<Void, SSHHostKeyError> {
         let state = await HostKeyVerificationModel.shared.evaluate(session: session)
         switch state {
-        case .trustedBySystem, .trustedBySSHStudio:
+        case .trustedBySystem, .trustedBySSHStudio, .trustedByOpenSSHConfiguration:
             return .success(())
         case .unknown:
             return .failure(.store("Host verification is required before connecting."))

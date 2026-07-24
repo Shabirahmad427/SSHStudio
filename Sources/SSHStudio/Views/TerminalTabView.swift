@@ -146,7 +146,7 @@ struct TerminalTabView: View {
         connectionService.checkingHostIdentity(endpoint)
         let state = await hostKeyModel.evaluate(session: session)
         switch state {
-        case .trustedBySystem, .trustedBySSHStudio:
+        case .trustedBySystem, .trustedBySSHStudio, .trustedByOpenSSHConfiguration:
             return true
         case .unknown:
             connectionService.awaitingHostVerification(endpoint)

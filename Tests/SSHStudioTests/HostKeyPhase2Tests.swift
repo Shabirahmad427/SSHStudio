@@ -51,6 +51,80 @@ struct HostKeyPhase2Tests {
         #expect(await discovery.callCount == 0)
     }
 
+    @Test func sshConfigAliasResolutionUsesOpenSSHVerificationWithoutScanning() async {
+        let endpoint = SSHHostEndpoint(hostname: "alias-name")
+        let discovery = FakeHostKeyDiscovery(error: SSHHostKeyError.store("scan should not run"))
+        let service = HostKeyVerificationService(
+            store: InMemoryHostKeyStore(),
+            discovery: discovery,
+            configResolver: FakeSSHConfigResolver(
+                resolution: SSHConfigResolution(
+                    requestedHost: "alias-name",
+                    resolvedHostName: "resolved.example.com",
+                    port: 22,
+                    hostKeyAlias: nil,
+                    proxyJump: nil,
+                    proxyCommand: nil
+                )
+            )
+        )
+
+        let state = await service.evaluate(endpoint: endpoint)
+        #expect(state == .trustedByOpenSSHConfiguration)
+        #expect(await discovery.callCount == 0)
+    }
+
+    @Test func proxyJumpAliasUsesOpenSSHVerificationWithoutScanning() async {
+        let endpoint = SSHHostEndpoint(hostname: "jump-alias")
+        let discovery = FakeHostKeyDiscovery(error: SSHHostKeyError.store("scan should not run"))
+        let service = HostKeyVerificationService(
+            store: InMemoryHostKeyStore(),
+            discovery: discovery,
+            configResolver: FakeSSHConfigResolver(
+                resolution: SSHConfigResolution(
+                    requestedHost: "jump-alias",
+                    resolvedHostName: "jump-alias",
+                    port: 22,
+                    hostKeyAlias: nil,
+                    proxyJump: "bastion",
+                    proxyCommand: nil
+                )
+            )
+        )
+
+        let state = await service.evaluate(endpoint: endpoint)
+        #expect(state == .trustedByOpenSSHConfiguration)
+        #expect(await discovery.callCount == 0)
+    }
+
+    @Test func plainHostStillScansWhenNoConfigRoutingIsRequired() async {
+        let endpoint = SSHHostEndpoint(hostname: "plain.internal")
+        let candidate = try! candidate(endpoint: endpoint, keySeed: "one")
+        let discovery = FakeHostKeyDiscovery(candidates: [candidate])
+        let service = HostKeyVerificationService(
+            store: InMemoryHostKeyStore(),
+            discovery: discovery,
+            configResolver: FakeSSHConfigResolver(
+                resolution: SSHConfigResolution(
+                    requestedHost: "plain.internal",
+                    resolvedHostName: "plain.internal",
+                    port: 22,
+                    hostKeyAlias: nil,
+                    proxyJump: nil,
+                    proxyCommand: nil
+                )
+            )
+        )
+
+        let state = await service.evaluate(endpoint: endpoint)
+        guard case .unknown(let candidates) = state else {
+            Issue.record("Expected unknown state")
+            return
+        }
+        #expect(candidates == [candidate])
+        #expect(await discovery.callCount == 1)
+    }
+
     @Test func unknownHostReturnsUnverifiedCandidates() async {
         let endpoint = SSHHostEndpoint(hostname: "unknown.internal")
         let candidate = try! candidate(endpoint: endpoint, keySeed: "one")
@@ -237,5 +311,13 @@ actor FakeHostKeyDiscovery: HostKeyDiscovery {
         }
         if let error { throw error }
         return candidates
+    }
+}
+
+struct FakeSSHConfigResolver: SSHConfigResolving {
+    var resolution: SSHConfigResolution?
+
+    func resolve(host: String) async -> SSHConfigResolution? {
+        resolution
     }
 }

@@ -83,6 +83,7 @@ enum SSHHostTrustState: Codable, Hashable {
     case checking
     case trustedBySystem
     case trustedBySSHStudio
+    case trustedByOpenSSHConfiguration
     case unknown([SSHHostKeyCandidate])
     case changed(previous: SSHHostKeyRecord, presented: SSHHostKeyCandidate)
     case unavailable(String)

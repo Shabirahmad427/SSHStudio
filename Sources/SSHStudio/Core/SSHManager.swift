@@ -121,7 +121,7 @@ class SSHManager: ObservableObject {
             let state = await HostKeyVerificationModel.shared.evaluate(session: session)
             guard self.requestedTunnels[tunnel.id] != nil else { return }
             switch state {
-            case .trustedBySystem, .trustedBySSHStudio:
+            case .trustedBySystem, .trustedBySSHStudio, .trustedByOpenSSHConfiguration:
                 self.launchTunnel(tunnel: tunnel, session: session)
             case .unknown:
                 self.tunnelStates[tunnel.id] = .awaitingHostVerification(endpoint)

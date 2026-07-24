@@ -2,35 +2,33 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleIdentifier</key>
-    <string>com.sshstudio.app</string>
-    <key>CFBundleName</key>
-    <string>SSH Studio</string>
-    <key>CFBundleExecutable</key>
-    <string>SSHStudio</string>
-    <key>CFBundleDisplayName</key>
-    <string>SSH Studio</string>
-    <key>CFBundleVersion</key>
-    <string>5</string>
-    <key>CFBundleShortVersionString</key>
-    <string>1.0.0</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleIconFile</key>
-    <string>SSHStudio.icns</string>
-    <key>NSPrincipalClass</key>
-    <string>NSApplication</string>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-    <key>LSMinimumSystemVersion</key>
-    <string>14.0</string>
-    <key>NSHumanReadableCopyright</key>
-    <string>Copyright © 2026 SSH Studio. All rights reserved.</string>
-    <!-- Populate these before publishing updates. The updater refuses non-HTTPS URLs. -->
-    <key>SSHStudioUpdateManifestURL</key>
-    <string></string>
-    <!-- Base64-encoded 32-byte Ed25519 public key. Keep the private key offline. -->
-    <key>SSHStudioUpdatePublicKey</key>
-    <string></string>
+	<key>CFBundleDisplayName</key>
+	<string>SSH Studio</string>
+	<key>CFBundleExecutable</key>
+	<string>SSHStudio</string>
+	<key>CFBundleIconFile</key>
+	<string>SSHStudio.icns</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.sshstudio.app</string>
+	<key>CFBundleName</key>
+	<string>SSH Studio</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0.0</string>
+	<key>CFBundleVersion</key>
+	<string>6</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>Copyright © 2026 SSH Studio. All rights reserved.</string>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+	<key>SSHStudioUpdateManifestURL</key>
+	<string></string>
+	<key>SSHStudioUpdatePublicKey</key>
+	<string></string>
 </dict>
 </plist>
