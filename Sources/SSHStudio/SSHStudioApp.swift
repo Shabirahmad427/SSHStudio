@@ -7,6 +7,12 @@ struct SSHStudioApp: App {
     @StateObject private var appearance = AppAppearanceSettings.shared
     @StateObject private var updater = UpdateManager.shared
 
+    init() {
+        if MigrationCheckCommand.shouldRun(arguments: CommandLine.arguments) {
+            exit(MigrationCheckCommand.runAndPrint())
+        }
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView()
