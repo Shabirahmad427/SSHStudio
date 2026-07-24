@@ -64,16 +64,10 @@ class SFTPManager: ObservableObject {
     }
 
     static func startDirectory(for session: Session) -> String {
-        let configured = session.remoteDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !configured.isEmpty { return configured }
-
-        let identifiers = [session.name, session.host, session.sshConfigAlias]
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
-        if identifiers.contains(where: { $0.contains("docinho") }) {
-            return "/media/shabir/Expansion"
-        }
-
-        return "~"
+        let configured = session.remoteStartDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
+        let legacy = session.remoteDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
+        let candidate = configured.isEmpty ? legacy : configured
+        return (try? SFTPPath(candidate).rawValue) ?? SFTPPath.home.rawValue
     }
 
     func goHome(for session: Session) {

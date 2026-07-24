@@ -304,6 +304,7 @@ enum SSHCommandBuilder {
             session.host,
             session.sshConfigAlias,
             session.privateKeyPath,
+            session.remoteStartDirectory,
             session.remoteDirectory,
             session.screenSharingHost,
             session.remoteAccessAddress

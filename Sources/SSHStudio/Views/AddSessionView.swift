@@ -14,6 +14,7 @@ struct AddSessionView: View {
     @State private var privateKeyPath: String
     @State private var sshConfigAlias: String
     @State private var credentialReferenceID: String
+    @State private var remoteStartDirectory: String
     @State private var remoteDirectory: String
     @State private var screenSharingHost: String
     @State private var screenSharingPort: Int
@@ -34,6 +35,7 @@ struct AddSessionView: View {
         _privateKeyPath = State(initialValue: existing?.privateKeyPath ?? "")
         _sshConfigAlias = State(initialValue: existing?.sshConfigAlias ?? "")
         _credentialReferenceID = State(initialValue: existing?.credentialReferenceID ?? "")
+        _remoteStartDirectory = State(initialValue: existing?.remoteStartDirectory ?? existing?.remoteDirectory ?? "")
         _remoteDirectory = State(initialValue: existing?.remoteDirectory ?? "")
         _screenSharingHost = State(initialValue: existing?.screenSharingHost ?? "")
         _screenSharingPort = State(initialValue: existing?.screenSharingPort ?? 5900)
@@ -172,7 +174,7 @@ struct AddSessionView: View {
 
     private var terminalSection: some View {
         Section {
-            TextField("Initial Remote Directory", text: $remoteDirectory)
+            TextField("Remote Start Directory", text: $remoteStartDirectory)
             LabeledContent("Terminal Font") {
                 Text("Configured in Terminal Settings")
                     .foregroundStyle(.secondary)
@@ -282,7 +284,8 @@ struct AddSessionView: View {
             privateKeyPath: privateKeyPath.trimmingCharacters(in: .whitespacesAndNewlines),
             sshConfigAlias: sshConfigAlias.trimmingCharacters(in: .whitespacesAndNewlines),
             credentialReferenceID: credentialReferenceID,
-            remoteDirectory: remoteDirectory.trimmingCharacters(in: .whitespacesAndNewlines),
+            remoteStartDirectory: remoteStartDirectory.trimmingCharacters(in: .whitespacesAndNewlines),
+            remoteDirectory: remoteStartDirectory.trimmingCharacters(in: .whitespacesAndNewlines),
             screenSharingHost: screenSharingHost.trimmingCharacters(in: .whitespacesAndNewlines),
             screenSharingPort: screenSharingPort,
             remoteScreenMode: remoteScreenMode,

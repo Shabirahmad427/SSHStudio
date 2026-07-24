@@ -1,7 +1,7 @@
 import Foundation
 
 struct Session: Codable, Identifiable, Hashable {
-    static let currentSchemaVersion = 2
+    static let currentSchemaVersion = 3
 
     var schemaVersion: Int = Self.currentSchemaVersion
     var id: UUID = UUID()
@@ -17,6 +17,7 @@ struct Session: Codable, Identifiable, Hashable {
     /// reveal routing information and is preserved for compatibility.
     var sshConfigAlias: String = ""
     var credentialReferenceID: String = ""
+    var remoteStartDirectory: String = ""
     var remoteDirectory: String = ""
     var screenSharingHost: String = ""
     var screenSharingPort: Int = 5900
@@ -35,7 +36,7 @@ struct Session: Codable, Identifiable, Hashable {
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion, id, name, host, port, username, authMethod
-        case privateKeyPath, sshConfigAlias, credentialReferenceID, remoteDirectory
+        case privateKeyPath, sshConfigAlias, credentialReferenceID, remoteStartDirectory, remoteDirectory
         case screenSharingHost, screenSharingPort
         case remoteScreenMode, remoteAccessAddress, tunnels
         case favorite, group
@@ -51,6 +52,7 @@ struct Session: Codable, Identifiable, Hashable {
         privateKeyPath: String = "",
         sshConfigAlias: String = "",
         credentialReferenceID: String = "",
+        remoteStartDirectory: String = "",
         remoteDirectory: String = "",
         screenSharingHost: String = "",
         screenSharingPort: Int = 5900,
@@ -69,6 +71,7 @@ struct Session: Codable, Identifiable, Hashable {
         self.privateKeyPath = privateKeyPath
         self.sshConfigAlias = sshConfigAlias
         self.credentialReferenceID = credentialReferenceID
+        self.remoteStartDirectory = remoteStartDirectory
         self.remoteDirectory = remoteDirectory
         self.screenSharingHost = screenSharingHost
         self.screenSharingPort = screenSharingPort
@@ -91,7 +94,11 @@ struct Session: Codable, Identifiable, Hashable {
         privateKeyPath = try values.decodeIfPresent(String.self, forKey: .privateKeyPath) ?? ""
         sshConfigAlias = try values.decodeIfPresent(String.self, forKey: .sshConfigAlias) ?? ""
         credentialReferenceID = try values.decodeIfPresent(String.self, forKey: .credentialReferenceID) ?? ""
+        remoteStartDirectory = try values.decodeIfPresent(String.self, forKey: .remoteStartDirectory) ?? ""
         remoteDirectory = try values.decodeIfPresent(String.self, forKey: .remoteDirectory) ?? ""
+        if remoteStartDirectory.isEmpty {
+            remoteStartDirectory = remoteDirectory
+        }
         screenSharingHost = try values.decodeIfPresent(String.self, forKey: .screenSharingHost) ?? ""
         screenSharingPort = try values.decodeIfPresent(Int.self, forKey: .screenSharingPort) ?? 5900
         remoteScreenMode = try values.decodeIfPresent(RemoteScreenMode.self, forKey: .remoteScreenMode) ?? .sshTunnel
