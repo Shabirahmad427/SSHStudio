@@ -22,6 +22,11 @@ let package = Package(
                 ]),
             ],
         ),
+        .executableTarget(
+            name: "SSHStudioAskPass",
+            dependencies: [],
+            path: "Sources/SSHStudioAskPass"
+        ),
         .testTarget(
             name: "SSHStudioTests",
             dependencies: ["SSHStudio"],

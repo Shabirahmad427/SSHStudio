@@ -11,6 +11,10 @@ struct AddSessionView: View {
     @State private var port: Int
     @State private var username: String
     @State private var authMethod: Session.AuthMethod
+    @State private var authenticationKind: ProfileAuthenticationMethod.Kind
+    @State private var useAgent: Bool
+    @State private var addKeysToAgent: Bool
+    @State private var useKeychain: Bool
     @State private var privateKeyPath: String
     @State private var sshConfigAlias: String
     @State private var credentialReferenceID: String
@@ -32,6 +36,11 @@ struct AddSessionView: View {
         _port = State(initialValue: existing?.port ?? 22)
         _username = State(initialValue: existing?.username ?? NSUserName())
         _authMethod = State(initialValue: existing?.authMethod ?? .password)
+        let existingAuthentication = existing?.authentication ?? .sshConfigManaged
+        _authenticationKind = State(initialValue: existingAuthentication.kind)
+        _useAgent = State(initialValue: existingAuthentication.usesAgent)
+        _addKeysToAgent = State(initialValue: existingAuthentication.addsKeysToAgent)
+        _useKeychain = State(initialValue: existingAuthentication.usesKeychain)
         _privateKeyPath = State(initialValue: existing?.privateKeyPath ?? "")
         _sshConfigAlias = State(initialValue: existing?.sshConfigAlias ?? "")
         _credentialReferenceID = State(initialValue: existing?.credentialReferenceID ?? "")
@@ -112,22 +121,41 @@ struct AddSessionView: View {
 
     private var authenticationSection: some View {
         Section {
-            Picker("Method", selection: $authMethod) {
-                ForEach(Session.AuthMethod.allCases, id: \.self) { method in
-                    Text(method.rawValue).tag(method)
+            Picker("Method", selection: $authenticationKind) {
+                ForEach(ProfileAuthenticationMethod.Kind.allCases, id: \.self) { method in
+                    Text(method.displayName).tag(method)
                 }
             }
-            if authMethod == .privateKey {
+            if authenticationKind == .privateKey || authenticationKind == .macOSKeychain {
                 HStack {
                     TextField("Private Key", text: $privateKeyPath)
                     Button("Choose...") { choosePrivateKey() }
                 }
+                Toggle("Use SSH Agent", isOn: $useAgent)
+                    .disabled(authenticationKind == .macOSKeychain)
+                Toggle("Add Keys to Agent", isOn: $addKeysToAgent)
+                Toggle("Use Apple OpenSSH Keychain", isOn: $useKeychain)
+                    .disabled(authenticationKind == .macOSKeychain)
                 Text("Private-key paths are sensitive operational metadata. SSH Studio does not store private-key contents.")
                     .font(SSHStudioTypography.metadata)
                     .foregroundStyle(.secondary)
             }
+            if authenticationKind == .passwordCredential {
+                LabeledContent("Stored Credential") {
+                    Text(credentialReferenceID.isEmpty ? "Not saved" : "Reference configured")
+                        .foregroundStyle(.secondary)
+                }
+                Button("Remove Credential Reference", role: .destructive) {
+                    credentialReferenceID = ""
+                }
+                .disabled(credentialReferenceID.isEmpty)
+            }
             LabeledContent("Credential Reference") {
                 Text(credentialReferenceID.isEmpty ? "None" : "Stored reference")
+                    .foregroundStyle(.secondary)
+            }
+            LabeledContent("Agent") {
+                Text(ProcessInfo.processInfo.environment["SSH_AUTH_SOCK"] == nil ? "Not advertised" : "Advertised")
                     .foregroundStyle(.secondary)
             }
         } header: {
@@ -280,7 +308,8 @@ struct AddSessionView: View {
             host: host.trimmingCharacters(in: .whitespacesAndNewlines),
             port: port,
             username: username.trimmingCharacters(in: .whitespacesAndNewlines),
-            authMethod: authMethod,
+            authMethod: legacyAuthMethod,
+            authentication: makeAuthentication(),
             privateKeyPath: privateKeyPath.trimmingCharacters(in: .whitespacesAndNewlines),
             sshConfigAlias: sshConfigAlias.trimmingCharacters(in: .whitespacesAndNewlines),
             credentialReferenceID: credentialReferenceID,
@@ -294,6 +323,31 @@ struct AddSessionView: View {
             favorite: favorite,
             group: group.trimmingCharacters(in: .whitespacesAndNewlines)
         )
+    }
+
+    private var legacyAuthMethod: Session.AuthMethod {
+        switch authenticationKind {
+        case .privateKey, .macOSKeychain, .sshAgent, .sshConfigManaged:
+            return privateKeyPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? .password : .privateKey
+        case .passwordCredential:
+            return .password
+        }
+    }
+
+    private func makeAuthentication() -> ProfileAuthenticationMethod {
+        let keyPath = privateKeyPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch authenticationKind {
+        case .privateKey:
+            return .privateKey(path: keyPath, useAgent: useAgent, addKeysToAgent: addKeysToAgent, useKeychain: useKeychain)
+        case .sshAgent:
+            return .sshAgent
+        case .macOSKeychain:
+            return .macOSKeychain(path: keyPath, addKeysToAgent: addKeysToAgent)
+        case .passwordCredential:
+            return .passwordCredential(referenceID: credentialReferenceID)
+        case .sshConfigManaged:
+            return .sshConfigManaged
+        }
     }
 
     private func choosePrivateKey() {

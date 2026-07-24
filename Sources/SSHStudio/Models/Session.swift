@@ -1,7 +1,7 @@
 import Foundation
 
 struct Session: Codable, Identifiable, Hashable {
-    static let currentSchemaVersion = 3
+    static let currentSchemaVersion = 4
 
     var schemaVersion: Int = Self.currentSchemaVersion
     var id: UUID = UUID()
@@ -10,6 +10,7 @@ struct Session: Codable, Identifiable, Hashable {
     var port: Int = 22
     var username: String
     var authMethod: AuthMethod = .password
+    var authentication: ProfileAuthenticationMethod = .sshConfigManaged
     /// Sensitive operational metadata. This is a local file reference, not a
     /// credential value, and is preserved for compatibility with existing profiles.
     var privateKeyPath: String = ""
@@ -35,7 +36,7 @@ struct Session: Codable, Identifiable, Hashable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case schemaVersion, id, name, host, port, username, authMethod
+        case schemaVersion, id, name, host, port, username, authMethod, authentication
         case privateKeyPath, sshConfigAlias, credentialReferenceID, remoteStartDirectory, remoteDirectory
         case screenSharingHost, screenSharingPort
         case remoteScreenMode, remoteAccessAddress, tunnels
@@ -49,6 +50,7 @@ struct Session: Codable, Identifiable, Hashable {
         port: Int = 22,
         username: String,
         authMethod: AuthMethod = .password,
+        authentication: ProfileAuthenticationMethod? = nil,
         privateKeyPath: String = "",
         sshConfigAlias: String = "",
         credentialReferenceID: String = "",
@@ -68,6 +70,11 @@ struct Session: Codable, Identifiable, Hashable {
         self.port = port
         self.username = username
         self.authMethod = authMethod
+        self.authentication = authentication ?? ProfileAuthenticationMethod.legacy(
+            authMethod: authMethod,
+            privateKeyPath: privateKeyPath,
+            credentialReferenceID: credentialReferenceID
+        )
         self.privateKeyPath = privateKeyPath
         self.sshConfigAlias = sshConfigAlias
         self.credentialReferenceID = credentialReferenceID
@@ -94,6 +101,18 @@ struct Session: Codable, Identifiable, Hashable {
         privateKeyPath = try values.decodeIfPresent(String.self, forKey: .privateKeyPath) ?? ""
         sshConfigAlias = try values.decodeIfPresent(String.self, forKey: .sshConfigAlias) ?? ""
         credentialReferenceID = try values.decodeIfPresent(String.self, forKey: .credentialReferenceID) ?? ""
+        authentication = try values.decodeIfPresent(ProfileAuthenticationMethod.self, forKey: .authentication)
+            ?? ProfileAuthenticationMethod.legacy(
+                authMethod: authMethod,
+                privateKeyPath: privateKeyPath,
+                credentialReferenceID: credentialReferenceID
+            )
+        if privateKeyPath.isEmpty {
+            privateKeyPath = authentication.privateKeyPath
+        }
+        if credentialReferenceID.isEmpty {
+            credentialReferenceID = authentication.credentialReferenceID ?? ""
+        }
         remoteStartDirectory = try values.decodeIfPresent(String.self, forKey: .remoteStartDirectory) ?? ""
         remoteDirectory = try values.decodeIfPresent(String.self, forKey: .remoteDirectory) ?? ""
         if remoteStartDirectory.isEmpty {

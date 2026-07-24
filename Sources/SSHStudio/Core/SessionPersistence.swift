@@ -1,7 +1,7 @@
 import Foundation
 
 struct PersistedSessionProfile: Codable, Equatable {
-    static let currentSchemaVersion = 3
+    static let currentSchemaVersion = 4
 
     var schemaVersion: Int
     var session: Session

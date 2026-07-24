@@ -17,12 +17,24 @@ enum SSHHostKeyPolicy: String, Codable, Equatable {
 enum SSHAuthenticationMethod: Equatable {
     case password
     case privateKey(path: String)
+    case sshAgent
+    case macOSKeychain(path: String, addKeysToAgent: Bool)
+    case sshConfigManaged
+    case passwordCredential(referenceID: String)
 
     static func from(session: Session) -> Self {
-        if session.authMethod == .privateKey, !session.privateKeyPath.isEmpty {
-            return .privateKey(path: session.privateKeyPath)
+        switch session.authentication {
+        case .privateKey(let path, _, _, _):
+            return path.isEmpty ? .sshAgent : .privateKey(path: path)
+        case .sshAgent:
+            return .sshAgent
+        case .macOSKeychain(let path, let addKeysToAgent):
+            return .macOSKeychain(path: path, addKeysToAgent: addKeysToAgent)
+        case .passwordCredential(let referenceID):
+            return .passwordCredential(referenceID: referenceID)
+        case .sshConfigManaged:
+            return .sshConfigManaged
         }
-        return .password
     }
 }
 
@@ -201,9 +213,7 @@ enum SSHCommandBuilder {
             "-o", "IPQoS=\(qos)"
         ]
         args += baseOptions
-        if case .privateKey(let path) = SSHAuthenticationMethod.from(session: session) {
-            args += ["-o", "IdentitiesOnly=yes", "-i", path]
-        }
+        args += authenticationArgs(for: session)
         args += ["-p", "\(session.port)"]
         return args
     }
@@ -230,18 +240,47 @@ enum SSHCommandBuilder {
 
     static func destinationArgs(for session: Session) -> [String] {
         var args: [String] = []
-        if case .privateKey(let path) = SSHAuthenticationMethod.from(session: session) {
-            args += ["-o", "IdentitiesOnly=yes", "-i", path]
-        }
+        args += authenticationArgs(for: session)
         return args + ["-p", "\(session.port)", "--", connectionTarget(for: session)]
     }
 
     static func sftpDestinationArgs(for session: Session) -> [String] {
         var args: [String] = []
-        if case .privateKey(let path) = SSHAuthenticationMethod.from(session: session) {
-            args += ["-o", "IdentitiesOnly=yes", "-i", path]
-        }
+        args += authenticationArgs(for: session)
         return args + ["-P", "\(session.port)", connectionTarget(for: session)]
+    }
+
+    static func authenticationArgs(for session: Session) -> [String] {
+        switch session.authentication {
+        case .privateKey(let path, let useAgent, let addKeysToAgent, let useKeychain):
+            var args = ["-o", "IdentitiesOnly=yes"]
+            if useAgent {
+                args += ["-o", "IdentityAgent=SSH_AUTH_SOCK"]
+            }
+            if addKeysToAgent {
+                args += ["-o", "AddKeysToAgent=yes"]
+            }
+            if useKeychain {
+                args += ["-o", "IgnoreUnknown=UseKeychain", "-o", "UseKeychain=yes"]
+            }
+            if !path.isEmpty {
+                args += ["-i", path]
+            }
+            return args
+        case .macOSKeychain(let path, let addKeysToAgent):
+            var args = ["-o", "IgnoreUnknown=UseKeychain", "-o", "UseKeychain=yes", "-o", "IdentitiesOnly=yes"]
+            if addKeysToAgent {
+                args += ["-o", "AddKeysToAgent=yes"]
+            }
+            if !path.isEmpty {
+                args += ["-i", path]
+            }
+            return args
+        case .sshAgent:
+            return ["-o", "IdentityAgent=SSH_AUTH_SOCK"]
+        case .sshConfigManaged, .passwordCredential:
+            return []
+        }
     }
 
     static func connectionTarget(for session: Session) -> String {
@@ -272,7 +311,7 @@ enum SSHCommandBuilder {
                 throw SSHValidationError.invalidAlias
             }
         }
-        if !allowPassword, session.authMethod == .password {
+        if !allowPassword, !session.authentication.isNonInteractiveCapable {
             throw SSHValidationError.passwordNotAllowed(purposeLabel)
         }
     }
@@ -304,6 +343,8 @@ enum SSHCommandBuilder {
             session.host,
             session.sshConfigAlias,
             session.privateKeyPath,
+            session.authentication.privateKeyPath,
+            session.authentication.credentialReferenceID ?? "",
             session.remoteStartDirectory,
             session.remoteDirectory,
             session.screenSharingHost,

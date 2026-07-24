@@ -46,6 +46,7 @@ protocol CredentialStore {
     func read(_ reference: CredentialReference) throws -> CredentialSecret
     func update(_ reference: CredentialReference, secret: CredentialSecret) throws
     func delete(_ reference: CredentialReference) throws
+    func exists(_ reference: CredentialReference) -> Bool
 }
 
 final class InMemoryCredentialStore: CredentialStore {
@@ -69,6 +70,10 @@ final class InMemoryCredentialStore: CredentialStore {
 
     func delete(_ reference: CredentialReference) throws {
         guard values.removeValue(forKey: reference) != nil else { throw CredentialStoreError.notFound }
+    }
+
+    func exists(_ reference: CredentialReference) -> Bool {
+        values[reference] != nil
     }
 }
 
@@ -118,12 +123,38 @@ final class KeychainCredentialStore: CredentialStore {
         guard status == errSecSuccess else { throw CredentialStoreError.keychainStatus(status) }
     }
 
+    func exists(_ reference: CredentialReference) -> Bool {
+        var query = baseQuery(reference)
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        return SecItemCopyMatching(query as CFDictionary, nil) == errSecSuccess
+    }
+
     private func baseQuery(_ reference: CredentialReference) -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: reference.id
         ]
+    }
+}
+
+enum CredentialLifecycle {
+    static func orphanedReferences(sessions: [Session], store: CredentialStore) -> [CredentialReference] {
+        sessions
+            .compactMap { $0.authentication.credentialReferenceID }
+            .map(CredentialReference.init(id:))
+            .filter { !store.exists($0) }
+    }
+
+    static func duplicateProfileWithoutSecret(_ session: Session) -> Session {
+        var copy = session
+        copy.id = UUID()
+        copy.name = "\(session.name) Copy"
+        if case .passwordCredential = copy.authentication {
+            copy.authentication = .sshConfigManaged
+            copy.credentialReferenceID = ""
+        }
+        return copy
     }
 }
 
