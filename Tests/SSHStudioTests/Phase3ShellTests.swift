@@ -31,7 +31,11 @@ struct Phase3ShellTests {
     }
 
     @Test func defaultsUseStandardDomainWithoutPreviewOverride() {
-        let defaults = SSHStudioDefaults.makeSharedDefaults(environment: [:])
+        let defaults = SSHStudioDefaults.makeSharedDefaults(
+            environment: [:],
+            bundleIdentifier: SSHStudioDefaults.domain,
+            bundledFixtureURL: nil
+        )
         #expect(defaults === UserDefaults.standard)
     }
 
@@ -43,6 +47,24 @@ struct Phase3ShellTests {
         defaults.set("fixture", forKey: "phase3-test")
         #expect(UserDefaults(suiteName: suiteName)?.string(forKey: "phase3-test") == "fixture")
         UserDefaults.standard.removePersistentDomain(forName: suiteName)
+    }
+
+    @Test func previewBundleIdentifierCanLoadBundledFixtureDefaults() throws {
+        let bundleID = "com.sshstudio.phase4.tests.\(UUID().uuidString)"
+        let plistURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("sshstudio-bundled-fixture-\(UUID().uuidString).plist")
+        let payload: NSDictionary = ["saved_sessions": Data("[]".utf8)]
+        #expect(payload.write(to: plistURL, atomically: true))
+
+        let defaults = SSHStudioDefaults.makeSharedDefaults(
+            environment: [:],
+            bundleIdentifier: bundleID,
+            bundledFixtureURL: plistURL
+        )
+
+        #expect(defaults.data(forKey: "saved_sessions") == Data("[]".utf8))
+        try? FileManager.default.removeItem(at: plistURL)
+        UserDefaults.standard.removePersistentDomain(forName: "\(bundleID).defaults")
     }
 
     @Test func defaultsCanLoadVolatilePreviewPlist() throws {
