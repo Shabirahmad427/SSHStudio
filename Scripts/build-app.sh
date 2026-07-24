@@ -108,13 +108,12 @@ sign_item() {
   esac
 }
 
-sign_item "$APP/Contents/Resources/SwiftTerm_SwiftTerm.bundle"
 sign_item "$APP/Contents/Helpers/SSHStudioAskPass"
 sign_item "$APP/Contents/MacOS/SSHStudio"
 sign_item "$APP"
 
 if [[ "$SIGN_MODE" != "unsigned" ]]; then
-  codesign --verify --strict --verbose=2 "$APP"
+  codesign --verify --deep --strict --verbose=2 "$APP"
   codesign -d --entitlements :- "$APP" >/dev/null 2>&1 || true
   spctl --assess --type execute --verbose "$APP" || true
 fi
