@@ -4,6 +4,7 @@ struct SessionTabBar: View {
     let openSessions: [OpenSession]
     @Binding var selectedID: UUID?
     let onClose: (OpenSession) -> Void
+    let onDuplicate: (OpenSession) -> Void
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
@@ -14,7 +15,8 @@ struct SessionTabBar: View {
                         connectionService: open.connectionService,
                         isSelected: selectedID == open.id,
                         onSelect: { selectedID = open.id },
-                        onClose: { onClose(open) }
+                        onClose: { onClose(open) },
+                        onDuplicate: { onDuplicate(open) }
                     )
                 }
             }
@@ -31,6 +33,7 @@ private struct SessionTabItem: View {
     let isSelected: Bool
     let onSelect: () -> Void
     let onClose: () -> Void
+    let onDuplicate: () -> Void
     @State private var hovered = false
 
     var body: some View {
@@ -61,6 +64,12 @@ private struct SessionTabItem: View {
         }
         .buttonStyle(.plain)
         .onHover { hovered = $0 }
+        .contextMenu {
+            Button("Select Tab", action: onSelect)
+            Button("Duplicate Tab", action: onDuplicate)
+            Divider()
+            Button("Close Tab", role: .destructive, action: onClose)
+        }
         .accessibilityLabel("\(open.session.name), \(SSHStudioStatusStyle.connection(connectionService.state).title)")
     }
 }

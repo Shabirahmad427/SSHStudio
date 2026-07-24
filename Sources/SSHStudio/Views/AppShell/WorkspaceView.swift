@@ -6,6 +6,7 @@ struct WorkspaceView: View {
     let openSessions: [OpenSession]
     @Binding var selectedOpenID: UUID?
     let onClose: (OpenSession) -> Void
+    let onDuplicate: (OpenSession) -> Void
     let onQuickConnect: () -> Void
 
     @AppStorage("app_shell_inspector_visible") private var inspectorVisible = true
@@ -19,6 +20,7 @@ struct WorkspaceView: View {
             WorkspaceToolbar(
                 open: selectedOpen,
                 inspectorVisible: $inspectorVisible,
+                onDuplicate: onDuplicate,
                 onQuickConnect: onQuickConnect
             )
             Divider()
@@ -28,7 +30,8 @@ struct WorkspaceView: View {
                         SessionTabBar(
                             openSessions: openSessions,
                             selectedID: $selectedOpenID,
-                            onClose: onClose
+                            onClose: onClose,
+                            onDuplicate: onDuplicate
                         )
                         Divider()
                     }
@@ -55,7 +58,7 @@ struct WorkspaceView: View {
             ZStack {
                 ForEach(openSessions) { open in
                     let isSelected = selectedOpenID == open.id
-                    SessionDetailWrapper(open: open, store: store, sshManager: sshManager)
+                    SessionDetailWrapper(open: open, store: store, sshManager: sshManager, isSelected: isSelected)
                         .opacity(isSelected ? 1 : 0)
                         .allowsHitTesting(isSelected)
                         .zIndex(isSelected ? 1 : 0)
@@ -69,6 +72,7 @@ struct WorkspaceToolbar: View {
     @ObservedObject private var terminalSettings = TerminalSettings.shared
     let open: OpenSession?
     @Binding var inspectorVisible: Bool
+    let onDuplicate: (OpenSession) -> Void
     let onQuickConnect: () -> Void
 
     var body: some View {
@@ -82,6 +86,13 @@ struct WorkspaceToolbar: View {
 
             if let open {
                 WorkspaceToolbarSessionControls(open: open, connectionService: open.connectionService)
+                Button {
+                    onDuplicate(open)
+                } label: {
+                    Image(systemName: "plus.square.on.square")
+                }
+                .buttonStyle(.borderless)
+                .help("Duplicate Workspace Tab")
             }
 
             Spacer()
@@ -114,6 +125,18 @@ struct WorkspaceToolbar: View {
         .padding(.horizontal, SSHStudioSpacing.md)
         .padding(.vertical, SSHStudioSpacing.sm)
         .background(.bar)
+        .onReceive(NotificationCenter.default.publisher(for: .toggleSSHStudioInspector)) { _ in
+            inspectorVisible.toggle()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .increaseSSHStudioTerminalFont)) { _ in
+            terminalSettings.fontSize = min(36, terminalSettings.fontSize + 1)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .decreaseSSHStudioTerminalFont)) { _ in
+            terminalSettings.fontSize = max(10, terminalSettings.fontSize - 1)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .resetSSHStudioTerminalFont)) { _ in
+            terminalSettings.fontSize = 17
+        }
     }
 }
 
@@ -153,6 +176,7 @@ struct SessionDetailWrapper: View {
     @ObservedObject var open: OpenSession
     @ObservedObject var store: SessionStore
     @ObservedObject var sshManager: SSHManager
+    let isSelected: Bool
 
     var body: some View {
         SessionDetailView(
@@ -168,7 +192,8 @@ struct SessionDetailWrapper: View {
             sftpManager: open.sftpManager,
             connectionService: open.connectionService,
             sftpLocalHistory: open.sftpLocalHistory,
-            allSessions: store.sessions
+            allSessions: store.sessions,
+            isSelected: isSelected
         )
     }
 }
@@ -181,6 +206,7 @@ struct SessionDetailView: View {
     @ObservedObject var connectionService: SSHConnectionService
     @ObservedObject var sftpLocalHistory: NavigationHistory<URL>
     let allSessions: [Session]
+    let isSelected: Bool
     @State private var terminalInstanceID = UUID()
 
     var body: some View {
@@ -230,6 +256,14 @@ struct SessionDetailView: View {
                 guard let endpointKey = note.userInfo?["endpointKey"] as? String,
                       endpointKey == SSHHostEndpoint(session: session).key else { return }
                 terminalInstanceID = UUID()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .reconnectSSHStudioActiveSession)) { _ in
+                guard isSelected else { return }
+                terminalInstanceID = UUID()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .cancelSSHStudioReconnect)) { _ in
+                guard isSelected else { return }
+                connectionService.cancelReconnect()
             }
 
             WorkspaceStatusBar(

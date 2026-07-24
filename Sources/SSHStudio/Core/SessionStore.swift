@@ -6,7 +6,7 @@ class SessionStore: ObservableObject {
 
     private let key = "saved_sessions"
     private let backupKey = "saved_sessions_backup_schema0"
-    private let migrationMarkerKey = "saved_sessions_migrated_schema1"
+    private let migrationMarkerKey = "saved_sessions_migrated_schema2"
     private let defaults: UserDefaults
 
     init(defaults: UserDefaults = SSHStudioDefaults.shared) {

@@ -7,10 +7,11 @@ struct SidebarView: View {
     let onSelect: (Session) -> Void
     let onQuickConnect: () -> Void
     let onCommandPalette: () -> Void
+    let onNewConnection: () -> Void
 
     @ObservedObject private var appearance = AppAppearanceSettings.shared
-    @State private var showAddSession = false
     @State private var editingSession: Session?
+    @State private var pendingDelete: Session?
     @State private var searchText = ""
 
     private var filteredSessions: [Session] {
@@ -31,9 +32,23 @@ struct SidebarView: View {
             footer
         }
         .background(SSHStudioColors.sidebarBackground)
-        .sheet(isPresented: $showAddSession) { AddSessionView { store.add($0) } }
         .sheet(item: $editingSession) { session in
             AddSessionView(existing: session) { store.update($0) }
+        }
+        .confirmationDialog(
+            "Delete this saved host?",
+            isPresented: Binding(
+                get: { pendingDelete != nil },
+                set: { if !$0 { pendingDelete = nil } }
+            ),
+            presenting: pendingDelete
+        ) { session in
+            Button("Delete \(session.name)", role: .destructive) {
+                delete(session)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { session in
+            Text("Open workspace tabs are closed separately. This only removes the saved profile.")
         }
     }
 
@@ -70,9 +85,7 @@ struct SidebarView: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.small)
-            Button {
-                showAddSession = true
-            } label: {
+            Button(action: onNewConnection) {
                 Image(systemName: "plus")
                     .frame(width: 24)
             }
@@ -114,36 +127,48 @@ struct SidebarView: View {
 
     private var sessionList: some View {
         List(selection: .constant(selectedOpenID)) {
-            Section("Saved Hosts") {
+            if !openSessions.isEmpty {
+                Section("Active") {
+                    ForEach(openSessions) { open in
+                        SidebarSessionRow(
+                            session: open.session,
+                            open: open,
+                            isSelected: open.id == selectedOpenID,
+                            isOpen: true,
+                            onSelect: { onSelect(open.session) }
+                        )
+                        .tag(open.id)
+                        .listRowInsets(EdgeInsets(top: 3, leading: 10, bottom: 3, trailing: 10))
+                        .contextMenu { sessionContextMenu(for: open.session, isOpen: true) }
+                    }
+                }
+            }
+
+            Section("Favorites") {
+                let favorites = filteredSessions.filter(\.favorite)
+                if favorites.isEmpty {
+                    Text("No favorite hosts")
+                        .font(SSHStudioTypography.body)
+                        .foregroundStyle(.secondary)
+                        .padding(.vertical, SSHStudioSpacing.sm)
+                } else {
+                    ForEach(favorites) { session in
+                        sessionRow(for: session)
+                    }
+                }
+            }
+
+            Section("Groups") {
                 if filteredSessions.isEmpty {
                     Text(store.sessions.isEmpty ? "No saved hosts" : "No matching hosts")
                         .font(SSHStudioTypography.body)
                         .foregroundStyle(.secondary)
                         .padding(.vertical, SSHStudioSpacing.sm)
                 } else {
-                    ForEach(filteredSessions) { session in
-                        let open = openSessions.first { $0.session.id == session.id }
-                        SidebarSessionRow(
-                            session: session,
-                            open: open,
-                            isSelected: open?.id == selectedOpenID,
-                            isOpen: open != nil,
-                            onSelect: { onSelect(session) }
-                        )
-                        .tag(open?.id)
-                        .listRowInsets(EdgeInsets(top: 3, leading: 10, bottom: 3, trailing: 10))
-                        .contextMenu {
-                            Button("Connect") { onSelect(session) }
-                            Button("Edit") { editingSession = session }
-                            Button("Duplicate") {
-                                var copy = session
-                                copy.id = UUID()
-                                copy.name = "\(session.name) Copy"
-                                store.add(copy)
-                            }
-                            Divider()
-                            Button("Delete", role: .destructive) {
-                                store.delete(at: IndexSet(store.sessions.indices.filter { store.sessions[$0].id == session.id }))
+                    ForEach(groupedSessions.keys.sorted(), id: \.self) { group in
+                        DisclosureGroup(group) {
+                            ForEach(groupedSessions[group] ?? []) { session in
+                                sessionRow(for: session)
                             }
                         }
                     }
@@ -186,6 +211,62 @@ struct SidebarView: View {
         case .dark: return "moon"
         }
     }
+
+    private var groupedSessions: [String: [Session]] {
+        Dictionary(grouping: filteredSessions) { session in
+            let trimmed = session.group.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? "Saved Hosts" : trimmed
+        }
+    }
+
+    @ViewBuilder
+    private func sessionRow(for session: Session) -> some View {
+        let open = openSessions.first { $0.session.id == session.id }
+        SidebarSessionRow(
+            session: session,
+            open: open,
+            isSelected: open?.id == selectedOpenID,
+            isOpen: open != nil,
+            onSelect: { onSelect(session) }
+        )
+        .tag(open?.id)
+        .listRowInsets(EdgeInsets(top: 3, leading: 10, bottom: 3, trailing: 10))
+        .contextMenu { sessionContextMenu(for: session, isOpen: open != nil) }
+    }
+
+    @ViewBuilder
+    private func sessionContextMenu(for session: Session, isOpen: Bool) -> some View {
+        Button(isOpen ? "Switch to Session" : "Connect") { onSelect(session) }
+        if isOpen {
+            Button("Reconnect") {
+                onSelect(session)
+                DispatchQueue.main.async {
+                    NotificationCenter.default.post(name: .reconnectSSHStudioActiveSession, object: nil)
+                }
+            }
+        }
+        Button(session.favorite ? "Remove Favorite" : "Add Favorite") {
+            var updated = session
+            updated.favorite.toggle()
+            store.update(updated)
+        }
+        Button("Edit") { editingSession = session }
+        Button("Duplicate") { duplicate(session) }
+        Divider()
+        Button("Delete", role: .destructive) { pendingDelete = session }
+    }
+
+    private func duplicate(_ session: Session) {
+        var copy = session
+        copy.id = UUID()
+        copy.name = "\(session.name) Copy"
+        store.add(copy)
+    }
+
+    private func delete(_ session: Session) {
+        store.delete(at: IndexSet(store.sessions.indices.filter { store.sessions[$0].id == session.id }))
+        pendingDelete = nil
+    }
 }
 
 private struct SidebarSessionRow: View {
@@ -202,10 +283,18 @@ private struct SidebarSessionRow: View {
                     .foregroundStyle(isOpen ? Color.accentColor : Color.secondary)
                     .frame(width: 20)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(session.name)
-                        .font(SSHStudioTypography.bodyEmphasis)
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
+                    HStack(spacing: 4) {
+                        Text(session.name)
+                            .font(SSHStudioTypography.bodyEmphasis)
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                        if session.favorite {
+                            Image(systemName: "star.fill")
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                                .accessibilityHidden(true)
+                        }
+                    }
                     Text("\(session.username)@\(session.host)")
                         .font(SSHStudioTypography.metadata)
                         .foregroundStyle(.secondary)

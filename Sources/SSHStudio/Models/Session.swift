@@ -1,7 +1,7 @@
 import Foundation
 
 struct Session: Codable, Identifiable, Hashable {
-    static let currentSchemaVersion = 1
+    static let currentSchemaVersion = 2
 
     var schemaVersion: Int = Self.currentSchemaVersion
     var id: UUID = UUID()
@@ -23,6 +23,8 @@ struct Session: Codable, Identifiable, Hashable {
     var remoteScreenMode: RemoteScreenMode = .sshTunnel
     var remoteAccessAddress: String = ""
     var tunnels: [TunnelConfig] = []
+    var favorite: Bool = false
+    var group: String = ""
 
     enum RemoteScreenMode: String, Codable, CaseIterable {
         case sshTunnel = "SSH Tunnel"
@@ -36,6 +38,7 @@ struct Session: Codable, Identifiable, Hashable {
         case privateKeyPath, sshConfigAlias, credentialReferenceID, remoteDirectory
         case screenSharingHost, screenSharingPort
         case remoteScreenMode, remoteAccessAddress, tunnels
+        case favorite, group
     }
 
     init(
@@ -53,7 +56,9 @@ struct Session: Codable, Identifiable, Hashable {
         screenSharingPort: Int = 5900,
         remoteScreenMode: RemoteScreenMode = .sshTunnel,
         remoteAccessAddress: String = "",
-        tunnels: [TunnelConfig] = []
+        tunnels: [TunnelConfig] = [],
+        favorite: Bool = false,
+        group: String = ""
     ) {
         self.id = id
         self.name = name
@@ -70,6 +75,8 @@ struct Session: Codable, Identifiable, Hashable {
         self.remoteScreenMode = remoteScreenMode
         self.remoteAccessAddress = remoteAccessAddress
         self.tunnels = tunnels
+        self.favorite = favorite
+        self.group = group
     }
 
     init(from decoder: Decoder) throws {
@@ -90,6 +97,8 @@ struct Session: Codable, Identifiable, Hashable {
         remoteScreenMode = try values.decodeIfPresent(RemoteScreenMode.self, forKey: .remoteScreenMode) ?? .sshTunnel
         remoteAccessAddress = try values.decodeIfPresent(String.self, forKey: .remoteAccessAddress) ?? ""
         tunnels = try values.decodeIfPresent([TunnelConfig].self, forKey: .tunnels) ?? []
+        favorite = try values.decodeIfPresent(Bool.self, forKey: .favorite) ?? false
+        group = try values.decodeIfPresent(String.self, forKey: .group) ?? ""
     }
 
     enum AuthMethod: String, Codable, CaseIterable {

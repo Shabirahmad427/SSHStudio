@@ -76,7 +76,6 @@ struct CommandPaletteView: View {
                                 .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
-                            .background(.quaternary.opacity(0.55), in: RoundedRectangle(cornerRadius: 9))
                         }
                     }
                 }

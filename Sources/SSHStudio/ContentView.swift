@@ -96,6 +96,47 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .showSSHStudioKnownHosts)) { _ in
             showKnownHosts = true
         }
+        .toolbar {
+            ToolbarItemGroup(placement: .navigation) {
+                Button {
+                    NotificationCenter.default.post(name: .toggleSSHStudioSidebar, object: nil)
+                } label: {
+                    Label("Toggle Sidebar", systemImage: "sidebar.leading")
+                }
+                .help("Toggle Sidebar")
+            }
+
+            ToolbarItemGroup(placement: .primaryAction) {
+                Button {
+                    showQuickConnect = true
+                } label: {
+                    Label("Quick Connect", systemImage: "bolt")
+                }
+                .help("Quick Connect")
+
+                Button {
+                    NotificationCenter.default.post(name: .showSSHStudioNewConnection, object: nil)
+                } label: {
+                    Label("New Connection", systemImage: "plus")
+                }
+                .help("New Connection")
+
+                Button {
+                    NotificationCenter.default.post(name: .reconnectSSHStudioActiveSession, object: nil)
+                } label: {
+                    Label("Reconnect", systemImage: "arrow.clockwise")
+                }
+                .help("Reconnect Active Session")
+                .disabled(selectedOpen == nil)
+
+                Button {
+                    NotificationCenter.default.post(name: .toggleSSHStudioInspector, object: nil)
+                } label: {
+                    Label("Inspector", systemImage: "sidebar.trailing")
+                }
+                .help("Toggle Inspector")
+            }
+        }
     }
 
     private var hostKeyTrustSheetBinding: Binding<HostKeyTrustSheetItem?> {

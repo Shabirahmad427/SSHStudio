@@ -13,6 +13,7 @@ struct AppShellView: View {
 
     @AppStorage("app_shell_column_visibility") private var storedColumnVisibility = "all"
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
+    @State private var showAddSession = false
 
     var selectedOpen: OpenSession? {
         openSessions.first { $0.id == selectedOpenID }
@@ -26,7 +27,8 @@ struct AppShellView: View {
                 selectedOpenID: selectedOpenID,
                 onSelect: openOrSwitch,
                 onQuickConnect: { showQuickConnect = true },
-                onCommandPalette: { showCommandPalette = true }
+                onCommandPalette: { showCommandPalette = true },
+                onNewConnection: { showAddSession = true }
             )
             .navigationSplitViewColumnWidth(
                 min: SSHStudioMetrics.sidebarMinWidth,
@@ -40,6 +42,7 @@ struct AppShellView: View {
                 openSessions: openSessions,
                 selectedOpenID: $selectedOpenID,
                 onClose: closeSession,
+                onDuplicate: duplicateSession,
                 onQuickConnect: { showQuickConnect = true }
             )
             .background(SSHStudioColors.windowBackground)
@@ -53,6 +56,27 @@ struct AppShellView: View {
         }
         .onChange(of: store.sessions) { _, sessions in
             refreshOpenSessions(from: sessions)
+        }
+        .sheet(isPresented: $showAddSession) { AddSessionView { store.add($0) } }
+        .onReceive(NotificationCenter.default.publisher(for: .showSSHStudioNewConnection)) { _ in
+            showAddSession = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .toggleSSHStudioSidebar)) { _ in
+            columnVisibility = columnVisibility == .detailOnly ? .all : .detailOnly
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .duplicateSSHStudioActiveTab)) { _ in
+            guard let selectedOpen else { return }
+            duplicateSession(selectedOpen)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .closeSSHStudioActiveTab)) { _ in
+            guard let selectedOpen else { return }
+            closeSession(selectedOpen)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .selectSSHStudioNextTab)) { _ in
+            selectOpenSession(offset: 1)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .selectSSHStudioPreviousTab)) { _ in
+            selectOpenSession(offset: -1)
         }
     }
 
@@ -72,6 +96,21 @@ struct AppShellView: View {
         if selectedOpenID == open.id {
             selectedOpenID = openSessions.last?.id
         }
+    }
+
+    private func duplicateSession(_ open: OpenSession) {
+        let duplicate = OpenSession(session: open.session)
+        duplicate.activeTab = open.activeTab
+        openSessions.append(duplicate)
+        selectedOpenID = duplicate.id
+        ConnectionLog.shared.log("Duplicated workspace tab", level: .info, session: open.session.name)
+    }
+
+    private func selectOpenSession(offset: Int) {
+        guard !openSessions.isEmpty else { return }
+        let currentIndex = selectedOpenID.flatMap { id in openSessions.firstIndex { $0.id == id } } ?? 0
+        let nextIndex = (currentIndex + offset + openSessions.count) % openSessions.count
+        selectedOpenID = openSessions[nextIndex].id
     }
 
     private func refreshOpenSessions(from sessions: [Session]) {

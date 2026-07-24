@@ -6,6 +6,18 @@ extension Notification.Name {
     static let showSSHStudioQuickConnect = Notification.Name("showSSHStudioQuickConnect")
     static let showSSHStudioKnownHosts = Notification.Name("showSSHStudioKnownHosts")
     static let sshStudioHostTrustApproved = Notification.Name("sshStudioHostTrustApproved")
+    static let showSSHStudioNewConnection = Notification.Name("showSSHStudioNewConnection")
+    static let toggleSSHStudioSidebar = Notification.Name("toggleSSHStudioSidebar")
+    static let toggleSSHStudioInspector = Notification.Name("toggleSSHStudioInspector")
+    static let duplicateSSHStudioActiveTab = Notification.Name("duplicateSSHStudioActiveTab")
+    static let closeSSHStudioActiveTab = Notification.Name("closeSSHStudioActiveTab")
+    static let reconnectSSHStudioActiveSession = Notification.Name("reconnectSSHStudioActiveSession")
+    static let cancelSSHStudioReconnect = Notification.Name("cancelSSHStudioReconnect")
+    static let selectSSHStudioNextTab = Notification.Name("selectSSHStudioNextTab")
+    static let selectSSHStudioPreviousTab = Notification.Name("selectSSHStudioPreviousTab")
+    static let increaseSSHStudioTerminalFont = Notification.Name("increaseSSHStudioTerminalFont")
+    static let decreaseSSHStudioTerminalFont = Notification.Name("decreaseSSHStudioTerminalFont")
+    static let resetSSHStudioTerminalFont = Notification.Name("resetSSHStudioTerminalFont")
 }
 
 struct HostKeyTrustSheetItem: Identifiable {

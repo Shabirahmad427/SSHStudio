@@ -1,7 +1,7 @@
 import Foundation
 
 struct PersistedSessionProfile: Codable, Equatable {
-    static let currentSchemaVersion = 1
+    static let currentSchemaVersion = 2
 
     var schemaVersion: Int
     var session: Session
@@ -46,11 +46,12 @@ enum SessionPersistenceMigrator {
                     throw SessionMigrationError.unsupportedVersion(profile.schemaVersion)
                 }
                 var session = profile.session
-                session.schemaVersion = profile.schemaVersion
+                session.schemaVersion = PersistedSessionProfile.currentSchemaVersion
                 try validate(session)
                 return session
             }
-            return SessionMigrationResult(sessions: sessions, needsWrite: false)
+            let needsWrite = profiles.contains { $0.schemaVersion < PersistedSessionProfile.currentSchemaVersion }
+            return SessionMigrationResult(sessions: sessions, needsWrite: needsWrite)
         }
 
         let legacy = try decoder.decode([Session].self, from: data)

@@ -61,4 +61,45 @@ struct Phase3ShellTests {
         try? FileManager.default.removeItem(at: plistURL)
         UserDefaults.standard.removePersistentDomain(forName: suiteName)
     }
+
+    @Test func phase3ProfileMetadataRoundTrips() throws {
+        let session = Session(
+            name: "Research Cluster",
+            host: "example.com",
+            username: "researcher",
+            favorite: true,
+            group: "Research"
+        )
+
+        let data = try SessionPersistenceMigrator.encode([session])
+        let result = try SessionPersistenceMigrator.decode(data)
+
+        #expect(result.needsWrite == false)
+        #expect(result.sessions.first?.favorite == true)
+        #expect(result.sessions.first?.group == "Research")
+        #expect(result.sessions.first?.schemaVersion == PersistedSessionProfile.currentSchemaVersion)
+    }
+
+    @Test func schemaOneProfilesMigrateToPhase3Schema() throws {
+        let legacyProfile = PersistedSessionProfile(
+            session: Session(name: "Analysis Server", host: "example.com", username: "analyst"),
+            schemaVersion: 1
+        )
+        let data = try JSONEncoder().encode([legacyProfile])
+
+        let result = try SessionPersistenceMigrator.decode(data)
+
+        #expect(result.needsWrite == true)
+        #expect(result.sessions.count == 1)
+        #expect(result.sessions[0].favorite == false)
+        #expect(result.sessions[0].group == "")
+        #expect(result.sessions[0].schemaVersion == PersistedSessionProfile.currentSchemaVersion)
+    }
+
+    @Test func appShellCommandNotificationsAreStable() {
+        #expect(Notification.Name.showSSHStudioNewConnection.rawValue == "showSSHStudioNewConnection")
+        #expect(Notification.Name.toggleSSHStudioInspector.rawValue == "toggleSSHStudioInspector")
+        #expect(Notification.Name.reconnectSSHStudioActiveSession.rawValue == "reconnectSSHStudioActiveSession")
+        #expect(Notification.Name.closeSSHStudioActiveTab.rawValue == "closeSSHStudioActiveTab")
+    }
 }
