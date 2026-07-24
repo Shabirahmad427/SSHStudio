@@ -8,12 +8,13 @@ DRY_RUN="true"
 CANDIDATE=""
 DESTINATION_APP="/Users/shabir/Applications/$APP_NAME"
 ROLLBACK_DIR=""
+BACKUP_DIR_OVERRIDE=""
 
 usage() {
   cat <<USAGE
 Usage:
   Scripts/install-app.sh --dry-run --candidate ".artifacts/SSH Studio.app" --destination "/Users/shabir/Applications/SSH Studio.app"
-  Scripts/install-app.sh --install --candidate ".artifacts/SSH Studio.app" --destination "/Users/shabir/Applications/SSH Studio.app"
+  Scripts/install-app.sh --install --candidate ".artifacts/SSH Studio.app" --destination "/Users/shabir/Applications/SSH Studio.app" [--backup-dir "/Users/shabir/Applications/SSH Studio Backups/<timestamp>"]
   Scripts/install-app.sh --rollback "/Users/shabir/Applications/SSH Studio Backups/<timestamp>" [--dry-run]
 USAGE
 }
@@ -32,6 +33,8 @@ while [[ $# -gt 0 ]]; do
       ACTION="install"; DRY_RUN="false"; shift ;;
     --rollback)
       ACTION="rollback"; ROLLBACK_DIR="$2"; shift 2 ;;
+    --backup-dir)
+      BACKUP_DIR_OVERRIDE="$2"; shift 2 ;;
     --help|-h)
       usage; exit 0 ;;
     *)
@@ -49,6 +52,18 @@ plist_value() {
 
 sha256() {
   shasum -a 256 "$1" | awk '{print $1}'
+}
+
+verify_matching_sha256() {
+  local first="$1"
+  local second="$2"
+  local first_hash second_hash
+  first_hash="$(sha256 "$first")"
+  second_hash="$(sha256 "$second")"
+  [[ "$first_hash" == "$second_hash" ]] || {
+    echo "Checksum mismatch: $first and $second" >&2
+    exit 1
+  }
 }
 
 verify_app() {
@@ -206,7 +221,11 @@ fi
 CANDIDATE="$(canonical_path "$CANDIDATE")"
 DESTINATION_APP="$(canonical_path "$DESTINATION_APP")"
 BACKUP_ROOT="$(backup_root_for "$DESTINATION_APP")/SSH Studio Backups"
-BACKUP_DIR="$BACKUP_ROOT/$(timestamp)"
+if [[ -n "$BACKUP_DIR_OVERRIDE" ]]; then
+  BACKUP_DIR="$(canonical_path "$BACKUP_DIR_OVERRIDE")"
+else
+  BACKUP_DIR="$BACKUP_ROOT/$(timestamp)"
+fi
 STAGING_APP="$(dirname "$DESTINATION_APP")/.SSH Studio.app.installing.$(timestamp).$$"
 
 verify_app "$CANDIDATE"
@@ -221,12 +240,17 @@ if [[ "$DRY_RUN" == "true" ]]; then
 fi
 
 umask 077
+if [[ -e "$BACKUP_DIR" ]]; then
+  echo "Backup directory already exists; refusing to overwrite: $BACKUP_DIR" >&2
+  exit 1
+fi
 mkdir -p "$BACKUP_DIR"
 chmod 700 "$BACKUP_DIR"
 
 if [[ -d "$DESTINATION_APP" ]]; then
   ditto "$DESTINATION_APP" "$BACKUP_DIR/$APP_NAME"
   verify_existing_app "$BACKUP_DIR/$APP_NAME"
+  verify_matching_sha256 "$DESTINATION_APP/Contents/MacOS/SSHStudio" "$BACKUP_DIR/$APP_NAME/Contents/MacOS/SSHStudio"
 fi
 
 PREFS="/Users/shabir/Library/Preferences/com.sshstudio.app.plist"
@@ -247,6 +271,7 @@ verify_app "$STAGING_APP"
 if [[ -d "$DESTINATION_APP" ]]; then
   mv "$DESTINATION_APP" "$BACKUP_DIR/installed-before-replacement.app"
   verify_existing_app "$BACKUP_DIR/installed-before-replacement.app"
+  verify_matching_sha256 "$BACKUP_DIR/$APP_NAME/Contents/MacOS/SSHStudio" "$BACKUP_DIR/installed-before-replacement.app/Contents/MacOS/SSHStudio"
 fi
 
 if ! mv "$STAGING_APP" "$DESTINATION_APP"; then

@@ -52,6 +52,8 @@ struct Phase6MigrationInstallTests {
         #expect(script.contains("--dry-run"))
         #expect(script.contains("--install"))
         #expect(script.contains("--rollback"))
+        #expect(script.contains("--backup-dir"))
+        #expect(script.contains("verify_matching_sha256"))
         #expect(script.contains("Refusing to install over a running SSH Studio instance"))
         #expect(!script.contains("rm -rf"))
         #expect(script.contains("ditto"))
