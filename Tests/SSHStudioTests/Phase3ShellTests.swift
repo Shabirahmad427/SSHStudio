@@ -124,4 +124,13 @@ struct Phase3ShellTests {
         #expect(Notification.Name.reconnectSSHStudioActiveSession.rawValue == "reconnectSSHStudioActiveSession")
         #expect(Notification.Name.closeSSHStudioActiveTab.rawValue == "closeSSHStudioActiveTab")
     }
+
+    @Test func inspectorDefaultsHiddenForTerminalSpace() {
+        let suite = "sshstudio-inspector-default-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        #expect(defaults.object(forKey: "app_shell_inspector_visible") == nil)
+        #expect(defaults.bool(forKey: "app_shell_inspector_visible") == false)
+    }
 }

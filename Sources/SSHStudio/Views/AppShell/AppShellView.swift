@@ -48,7 +48,7 @@ struct AppShellView: View {
             )
             .background(SSHStudioColors.windowBackground)
         }
-        .frame(minWidth: 1080, minHeight: 680)
+        .frame(minWidth: 920, minHeight: 680)
         .onAppear {
             columnVisibility = storedColumnVisibility == "detailOnly" ? .detailOnly : .all
         }

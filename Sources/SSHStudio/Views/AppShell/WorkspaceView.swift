@@ -9,7 +9,8 @@ struct WorkspaceView: View {
     let onDuplicate: (OpenSession) -> Void
     let onQuickConnect: () -> Void
 
-    @AppStorage("app_shell_inspector_visible") private var inspectorVisible = true
+    @AppStorage("app_shell_inspector_visible") private var inspectorVisible = false
+    @AppStorage("app_shell_inspector_default_hidden_v1") private var inspectorDefaultHiddenApplied = false
 
     private var selectedOpen: OpenSession? {
         openSessions.first { $0.id == selectedOpenID }
@@ -47,6 +48,11 @@ struct WorkspaceView: View {
                         )
                 }
             }
+        }
+        .onAppear {
+            guard !inspectorDefaultHiddenApplied else { return }
+            inspectorVisible = false
+            inspectorDefaultHiddenApplied = true
         }
     }
 
