@@ -137,6 +137,41 @@ verify_validated_rollback_source() {
   }
 }
 
+verify_preserved_invalid_backup() {
+  local app="$1"
+  local backup_dir="$2"
+  local failure_file="$backup_dir/installed-signature-failure.txt"
+  local hashes_file="$backup_dir/installed-bundle-sha256.txt"
+  [[ -f "$failure_file" ]] || return 1
+  [[ -f "$hashes_file" ]] || return 1
+  [[ -s "$failure_file" ]] || { echo "Invalid backup signature failure record is empty." >&2; exit 1; }
+  local current_hashes
+  current_hashes="$(mktemp)"
+  file_hashes_for_bundle "$app" "$current_hashes"
+  cmp -s "$hashes_file" "$current_hashes" || {
+    echo "Preserved invalid backup hashes do not match manifest." >&2
+    exit 1
+  }
+  rm -f "$current_hashes"
+  [[ "$(plist_value "$app" CFBundleIdentifier)" == "$BUNDLE_ID" ]] || {
+    echo "Preserved invalid backup bundle identifier mismatch." >&2
+    exit 1
+  }
+  [[ -x "$app/Contents/MacOS/SSHStudio" ]] || { echo "Preserved invalid backup executable missing." >&2; exit 1; }
+}
+
+verify_rollback_backup_app() {
+  local app="$1"
+  local backup_dir="$2"
+  if verify_existing_app "$app"; then
+    return 0
+  fi
+  verify_preserved_invalid_backup "$app" "$backup_dir" || {
+    echo "Rollback backup app is invalid and lacks verified preservation metadata." >&2
+    exit 1
+  }
+}
+
 validate_invalid_existing_override() {
   local destination="$1"
   local failure="$2"
@@ -310,7 +345,7 @@ rollback() {
   destination="$(canonical_path "$DESTINATION_APP")"
   current_backup="$backup_dir/$APP_NAME"
   [[ -d "$current_backup" ]] || { echo "Rollback backup app missing: $current_backup" >&2; exit 1; }
-  verify_existing_app "$current_backup"
+  verify_rollback_backup_app "$current_backup" "$backup_dir"
   refuse_running_destination "$destination"
   echo "rollback_backup=$backup_dir"
   echo "rollback_destination=$destination"

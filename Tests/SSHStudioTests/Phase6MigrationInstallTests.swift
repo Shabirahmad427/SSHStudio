@@ -102,6 +102,9 @@ struct Phase6MigrationInstallTests {
         #expect(script.contains("installed-signature-failure.txt"))
         #expect(script.contains("installed_signature_failure_file=installed-signature-failure.txt"))
         #expect(script.contains("rollback_instruction=Scripts/install-app.sh --rollback"))
+        #expect(script.contains("verify_preserved_invalid_backup"))
+        #expect(script.contains("Preserved invalid backup hashes do not match manifest."))
+        #expect(script.contains("Rollback backup app is invalid and lacks verified preservation metadata."))
     }
 
     @Test func installerRollbackSourceValidationIsMandatoryForInvalidExistingOverride() throws {
