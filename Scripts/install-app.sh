@@ -5,16 +5,20 @@ BUNDLE_ID="com.sshstudio.app"
 APP_NAME="SSH Studio.app"
 ACTION="install"
 DRY_RUN="true"
+ALLOW_INVALID_EXISTING_SIGNATURE="false"
 CANDIDATE=""
 DESTINATION_APP="/Users/shabir/Applications/$APP_NAME"
 ROLLBACK_DIR=""
 BACKUP_DIR_OVERRIDE=""
+EXPECTED_DESTINATION_APP="/Users/shabir/Applications/$APP_NAME"
+VALIDATED_ROLLBACK_SOURCE="/Users/shabir/Applications/SSH Studio Backups/20260724T010540Z/SSH Studio.app"
 
 usage() {
   cat <<USAGE
 Usage:
   Scripts/install-app.sh --dry-run --candidate ".artifacts/SSH Studio.app" --destination "/Users/shabir/Applications/SSH Studio.app"
-  Scripts/install-app.sh --install --candidate ".artifacts/SSH Studio.app" --destination "/Users/shabir/Applications/SSH Studio.app" [--backup-dir "/Users/shabir/Applications/SSH Studio Backups/<timestamp>"]
+  Scripts/install-app.sh --dry-run --allow-invalid-existing-signature --candidate ".artifacts/SSH Studio.app" --destination "/Users/shabir/Applications/SSH Studio.app"
+  Scripts/install-app.sh --install --candidate ".artifacts/SSH Studio.app" --destination "/Users/shabir/Applications/SSH Studio.app" [--allow-invalid-existing-signature] [--backup-dir "/Users/shabir/Applications/SSH Studio Backups/<timestamp>"]
   Scripts/install-app.sh --rollback "/Users/shabir/Applications/SSH Studio Backups/<timestamp>" [--dry-run]
 USAGE
 }
@@ -29,6 +33,10 @@ while [[ $# -gt 0 ]]; do
       DESTINATION_APP="$2"; shift 2 ;;
     --dry-run)
       DRY_RUN="true"; shift ;;
+    --allow-invalid-existing-signature)
+      ALLOW_INVALID_EXISTING_SIGNATURE="true"; shift ;;
+    --validated-rollback-source)
+      VALIDATED_ROLLBACK_SOURCE="$2"; shift 2 ;;
     --install)
       ACTION="install"; DRY_RUN="false"; shift ;;
     --rollback)
@@ -90,6 +98,86 @@ verify_existing_app() {
   codesign --verify --deep --strict --verbose=2 "$app" >/dev/null
 }
 
+signature_failure_for_app() {
+  local app="$1"
+  codesign --verify --deep --strict --verbose=4 "$app" 2>&1 >/dev/null || true
+}
+
+file_hashes_for_bundle() {
+  local app="$1"
+  local output="$2"
+  (
+    cd "$app"
+    find . -type f -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256
+  ) > "$output"
+}
+
+verify_bundle_hashes_match() {
+  local first="$1"
+  local second="$2"
+  local first_hashes second_hashes
+  first_hashes="$(mktemp)"
+  second_hashes="$(mktemp)"
+  file_hashes_for_bundle "$first" "$first_hashes"
+  file_hashes_for_bundle "$second" "$second_hashes"
+  cmp -s "$first_hashes" "$second_hashes" || {
+    echo "Backup bundle hashes do not match original." >&2
+    exit 1
+  }
+  rm -f "$first_hashes" "$second_hashes"
+}
+
+verify_validated_rollback_source() {
+  local source="$1"
+  [[ -d "$source" ]] || { echo "Validated rollback source missing: $source" >&2; exit 1; }
+  verify_existing_app "$source"
+  [[ "$(plist_value "$source" CFBundleIdentifier)" == "$BUNDLE_ID" ]] || {
+    echo "Validated rollback source bundle identifier mismatch." >&2
+    exit 1
+  }
+}
+
+validate_invalid_existing_override() {
+  local destination="$1"
+  local failure="$2"
+  [[ "$ALLOW_INVALID_EXISTING_SIGNATURE" == "true" ]] || {
+    echo "Existing installed app has an invalid signature. Re-run with --allow-invalid-existing-signature only after reviewing the integrity failure." >&2
+    echo "$failure" >&2
+    exit 1
+  }
+  [[ "$destination" == "$(canonical_path "$EXPECTED_DESTINATION_APP")" ]] || {
+    echo "--allow-invalid-existing-signature is limited to the exact SSH Studio destination path." >&2
+    exit 1
+  }
+  [[ ! -L "$destination" ]] || { echo "Refusing override because destination is a symlink." >&2; exit 1; }
+  [[ -x "$destination/Contents/MacOS/SSHStudio" ]] || { echo "Installed executable missing." >&2; exit 1; }
+  [[ "$(plist_value "$destination" CFBundleIdentifier)" == "$BUNDLE_ID" ]] || {
+    echo "Refusing override because installed bundle identifier is not $BUNDLE_ID." >&2
+    exit 1
+  }
+  file "$destination/Contents/MacOS/SSHStudio" | grep -q "arm64" || {
+    echo "Refusing override because installed executable is not arm64." >&2
+    exit 1
+  }
+  refuse_running_destination "$destination"
+  verify_validated_rollback_source "$(canonical_path "$VALIDATED_ROLLBACK_SOURCE")"
+  echo "WARNING: proceeding with invalid existing SSH Studio signature override." >&2
+  echo "installed_signature_failure=$failure" >&2
+  echo "validated_rollback_source=$(canonical_path "$VALIDATED_ROLLBACK_SOURCE")"
+  echo "invalid_existing_signature_override=true"
+}
+
+verify_existing_app_or_allowed_invalid() {
+  local app="$1"
+  [[ -d "$app" ]] || return 0
+  local failure
+  if failure="$(signature_failure_for_app "$app")"; [[ -z "$failure" ]]; then
+    verify_existing_app "$app"
+    return 0
+  fi
+  validate_invalid_existing_override "$app" "$failure"
+}
+
 refuse_running_destination() {
   local app="$1"
   if pgrep -f "$app/Contents/MacOS/SSHStudio" >/dev/null 2>&1; then
@@ -100,10 +188,6 @@ refuse_running_destination() {
 
 refuse_stale_candidate() {
   local candidate="$1"
-  if [[ -d .git ]] && [[ -n "$(git status --short)" ]]; then
-    echo "Repository has uncommitted changes; refusing to install a potentially stale candidate." >&2
-    exit 1
-  fi
   python3 - "$candidate" <<'PY'
 from pathlib import Path
 import subprocess
@@ -116,8 +200,25 @@ try:
     files = subprocess.check_output(["git", "ls-files"], text=True).splitlines()
 except Exception:
     sys.exit(0)
+package_inputs = (
+    "Package.swift",
+    "Package.resolved",
+    "Config/",
+    "Sources/",
+    "Scripts/build-app.sh",
+    "Scripts/sshstudio_metadata.py",
+)
+try:
+    dirty = subprocess.check_output(["git", "status", "--short", "--", *package_inputs], text=True).strip()
+except Exception:
+    dirty = ""
+if dirty:
+    sys.exit("Repository has uncommitted package-input changes; refusing to install a potentially stale candidate.")
 stamp_time = stamp.stat().st_mtime
-newer = [f for f in files if Path(f).exists() and Path(f).stat().st_mtime > stamp_time]
+newer = [
+    f for f in files
+    if f.startswith(package_inputs) and Path(f).exists() and Path(f).stat().st_mtime > stamp_time
+]
 if newer:
     sys.exit("Candidate is older than tracked source files; rebuild before installing.")
 PY
@@ -143,12 +244,24 @@ write_manifest() {
     echo "destination=$destination"
     echo "candidate_identifier=$(plist_value "$candidate" CFBundleIdentifier)"
     echo "candidate_version=$(plist_value "$candidate" CFBundleShortVersionString)"
-    echo "candidate_build=$(plist_value "$candidate" CFBundleVersion)"
-    if [[ -d "$backup_dir/$APP_NAME" ]]; then
-      echo "backup_executable_sha256=$(sha256 "$backup_dir/$APP_NAME/Contents/MacOS/SSHStudio")"
+  echo "candidate_build=$(plist_value "$candidate" CFBundleVersion)"
+  echo "candidate_executable_sha256=$(sha256 "$candidate/Contents/MacOS/SSHStudio")"
+  if [[ -d "$backup_dir/$APP_NAME" ]]; then
+    echo "installed_identifier=$(plist_value "$backup_dir/$APP_NAME" CFBundleIdentifier)"
+    echo "installed_version=$(plist_value "$backup_dir/$APP_NAME" CFBundleShortVersionString)"
+    echo "installed_build=$(plist_value "$backup_dir/$APP_NAME" CFBundleVersion)"
+    echo "backup_executable_sha256=$(sha256 "$backup_dir/$APP_NAME/Contents/MacOS/SSHStudio")"
+    if [[ -f "$backup_dir/installed-signature-failure.txt" ]]; then
+      echo "installed_signature_failure_file=installed-signature-failure.txt"
     fi
-    echo "candidate_executable_sha256=$(sha256 "$candidate/Contents/MacOS/SSHStudio")"
-    echo "keychain_secret_values_exported=false"
+    if [[ -f "$backup_dir/installed-bundle-sha256.txt" ]]; then
+      echo "installed_bundle_hashes_file=installed-bundle-sha256.txt"
+    fi
+  fi
+  echo "created_timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "rollback_source=$VALIDATED_ROLLBACK_SOURCE"
+  echo "rollback_instruction=Scripts/install-app.sh --rollback '$backup_dir' --destination '$destination' --dry-run"
+  echo "keychain_secret_values_exported=false"
   } > "$manifest"
   chmod 600 "$manifest"
 }
@@ -183,6 +296,8 @@ print_plan() {
   else
     echo "installed_present=false"
   fi
+  echo "allow_invalid_existing_signature=$ALLOW_INVALID_EXISTING_SIGNATURE"
+  echo "validated_rollback_source=$(canonical_path "$VALIDATED_ROLLBACK_SOURCE")"
   echo "backup_destination=$backup_dir"
   echo "rollback_command=Scripts/install-app.sh --rollback '$backup_dir' --destination '$destination' --dry-run"
   echo "planned_operations=validate,candidate_stage,backup_existing,rename_staged,verify_installed"
@@ -229,8 +344,7 @@ fi
 STAGING_APP="$(dirname "$DESTINATION_APP")/.SSH Studio.app.installing.$(timestamp).$$"
 
 verify_app "$CANDIDATE"
-verify_existing_app "$DESTINATION_APP"
-refuse_running_destination "$DESTINATION_APP"
+verify_existing_app_or_allowed_invalid "$DESTINATION_APP"
 refuse_stale_candidate "$CANDIDATE"
 print_plan "$CANDIDATE" "$DESTINATION_APP" "$BACKUP_DIR"
 
@@ -248,8 +362,18 @@ mkdir -p "$BACKUP_DIR"
 chmod 700 "$BACKUP_DIR"
 
 if [[ -d "$DESTINATION_APP" ]]; then
+  EXISTING_SIGNATURE_FAILURE="$(signature_failure_for_app "$DESTINATION_APP")"
+  if [[ -n "$EXISTING_SIGNATURE_FAILURE" ]]; then
+    validate_invalid_existing_override "$DESTINATION_APP" "$EXISTING_SIGNATURE_FAILURE"
+  fi
   ditto "$DESTINATION_APP" "$BACKUP_DIR/$APP_NAME"
-  verify_existing_app "$BACKUP_DIR/$APP_NAME"
+  file_hashes_for_bundle "$BACKUP_DIR/$APP_NAME" "$BACKUP_DIR/installed-bundle-sha256.txt"
+  if [[ -n "$EXISTING_SIGNATURE_FAILURE" ]]; then
+    printf '%s\n' "$EXISTING_SIGNATURE_FAILURE" > "$BACKUP_DIR/installed-signature-failure.txt"
+    verify_bundle_hashes_match "$DESTINATION_APP" "$BACKUP_DIR/$APP_NAME"
+  else
+    verify_existing_app "$BACKUP_DIR/$APP_NAME"
+  fi
   verify_matching_sha256 "$DESTINATION_APP/Contents/MacOS/SSHStudio" "$BACKUP_DIR/$APP_NAME/Contents/MacOS/SSHStudio"
 fi
 
@@ -270,7 +394,11 @@ verify_app "$STAGING_APP"
 
 if [[ -d "$DESTINATION_APP" ]]; then
   mv "$DESTINATION_APP" "$BACKUP_DIR/installed-before-replacement.app"
-  verify_existing_app "$BACKUP_DIR/installed-before-replacement.app"
+  if [[ -f "$BACKUP_DIR/installed-signature-failure.txt" ]]; then
+    verify_bundle_hashes_match "$BACKUP_DIR/$APP_NAME" "$BACKUP_DIR/installed-before-replacement.app"
+  else
+    verify_existing_app "$BACKUP_DIR/installed-before-replacement.app"
+  fi
   verify_matching_sha256 "$BACKUP_DIR/$APP_NAME/Contents/MacOS/SSHStudio" "$BACKUP_DIR/installed-before-replacement.app/Contents/MacOS/SSHStudio"
 fi
 
