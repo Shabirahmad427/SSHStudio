@@ -1261,12 +1261,16 @@ struct RemoteFileList: View {
                 }
                 .onTapGesture(count: 1) {
                     let flags = NSEvent.modifierFlags
-                    if flags.contains(.shift) {
-                        selectFile(file, event: .shift(file.id))
-                    } else if flags.contains(.command) {
-                        selectFile(file, event: .command(file.id))
-                    } else {
-                        selectFile(file, event: .single(file.id))
+                    switch SFTPRemoteClickPolicy.singleClickAction(
+                        id: file.id,
+                        isDirectory: file.isDirectory,
+                        commandKey: flags.contains(.command),
+                        shiftKey: flags.contains(.shift)
+                    ) {
+                    case .navigate:
+                        openFileOrDirectory(file)
+                    case .select(let event):
+                        selectFile(file, event: event)
                     }
                 }
                 .contextMenu { remoteContextMenu(for: file) }

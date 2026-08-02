@@ -28,6 +28,31 @@ enum SFTPSelectionEvent: Equatable, Sendable {
     case preserve(availableIDs: [String])
 }
 
+enum SFTPRemoteClickAction: Equatable, Sendable {
+    case navigate
+    case select(SFTPSelectionEvent)
+}
+
+enum SFTPRemoteClickPolicy {
+    static func singleClickAction(
+        id: String,
+        isDirectory: Bool,
+        commandKey: Bool,
+        shiftKey: Bool
+    ) -> SFTPRemoteClickAction {
+        if shiftKey {
+            return .select(.shift(id))
+        }
+        if commandKey {
+            return .select(.command(id))
+        }
+        if isDirectory {
+            return .navigate
+        }
+        return .select(.single(id))
+    }
+}
+
 struct SFTPSelectionReducer: Equatable, Sendable {
     private(set) var selectedIDs: Set<String> = []
     private(set) var anchorID: String?

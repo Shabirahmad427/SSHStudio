@@ -47,13 +47,26 @@ enum SSHSecurity {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support")
         let directory = base.appendingPathComponent("SSH Studio/ControlSockets", isDirectory: true)
-        if secureDirectory(directory) {
+        if openSSHOptionSafePath(directory.path), secureDirectory(directory) {
             return directory
         }
         let runtime = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-            .appendingPathComponent("ssh-studio-\(NSUserName())/ControlSockets", isDirectory: true)
+            .appendingPathComponent("ssh-studio-\(sanitizedRuntimeComponent(NSUserName()))/ControlSockets", isDirectory: true)
         _ = secureDirectory(runtime)
         return runtime
+    }
+
+    private static func openSSHOptionSafePath(_ path: String) -> Bool {
+        !path.unicodeScalars.contains {
+            CharacterSet.whitespacesAndNewlines.contains($0) || $0.value < 0x20
+        }
+    }
+
+    private static func sanitizedRuntimeComponent(_ value: String) -> String {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "._-"))
+        let scalars = value.unicodeScalars.map { allowed.contains($0) ? Character($0) : "_" }
+        let sanitized = String(scalars)
+        return sanitized.isEmpty ? "user" : sanitized
     }
 
     @discardableResult

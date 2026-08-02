@@ -83,6 +83,8 @@ struct SFTPPerformanceTests {
         let permissions = try #require(attributes[.posixPermissions] as? NSNumber).intValue
         #expect(permissions & 0o077 == 0)
         #expect(!directory.path.hasPrefix("/tmp/ssh-studio.sock"))
+        #expect(directory.path.rangeOfCharacter(from: .whitespacesAndNewlines) == nil)
+        #expect(SSHSecurity.controlPath(for: agentSession).rangeOfCharacter(from: .whitespacesAndNewlines) == nil)
     }
 
     @Test func fakeBenchmarkShowsPersistentBrowsingAvoidsPerNavigationLaunches() async throws {

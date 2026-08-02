@@ -205,6 +205,33 @@ struct Phase4SFTPTests {
         #expect(selection.selectedIDs.isEmpty)
     }
 
+    @Test func sftpSingleClickNavigatesDirectoriesAndModifierClicksSelect() {
+        #expect(SFTPRemoteClickPolicy.singleClickAction(
+            id: "dir",
+            isDirectory: true,
+            commandKey: false,
+            shiftKey: false
+        ) == .navigate)
+        #expect(SFTPRemoteClickPolicy.singleClickAction(
+            id: "dir",
+            isDirectory: true,
+            commandKey: true,
+            shiftKey: false
+        ) == .select(.command("dir")))
+        #expect(SFTPRemoteClickPolicy.singleClickAction(
+            id: "dir",
+            isDirectory: true,
+            commandKey: false,
+            shiftKey: true
+        ) == .select(.shift("dir")))
+        #expect(SFTPRemoteClickPolicy.singleClickAction(
+            id: "file",
+            isDirectory: false,
+            commandKey: false,
+            shiftKey: false
+        ) == .select(.single("file")))
+    }
+
     @Test func sftpKeyboardShortcutsRequireSFTPFocusAndAvoidTerminalFocus() {
         #expect(SFTPKeyboardRouter.command(
             key: "c",
