@@ -489,11 +489,77 @@ class SFTPManager: ObservableObject {
                     command: "get -a \(Self.sftpRemotePath(remotePath)) \(Self.sftpLocalPath(stagedURL.path))",
                     session: session, item: item, isDirectory: false
                 ) { succeeded in
-                    guard succeeded else { return }
-                    self._finaliseDownload(stagedURL: stagedURL, localURL: localURL, name: name,
-                                          item: item, session: session, completion: completion)
+                    if succeeded {
+                        self._finaliseDownload(stagedURL: stagedURL, localURL: localURL, name: name,
+                                              item: item, session: session, completion: completion)
+                    } else {
+                        self.downloadSingleFileWithRsyncFallback(
+                            remotePath: remotePath,
+                            name: name,
+                            stagedURL: stagedURL,
+                            localURL: localURL,
+                            session: session,
+                            item: item,
+                            completion: completion
+                        )
+                    }
                 }
             }
+        }
+    }
+
+    private func downloadSingleFileWithRsyncFallback(
+        remotePath: String,
+        name: String,
+        stagedURL: URL,
+        localURL: URL,
+        session: Session,
+        item: TransferItem,
+        completion: (@MainActor () -> Void)?
+    ) {
+        do {
+            try FileManager.default.createDirectory(
+                at: stagedURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+        } catch {
+            item.status = .failed(SFTPDownloadFailure.localDestinationUnavailable.message + ": \(error.localizedDescription)")
+            completion?()
+            return
+        }
+
+        try? FileManager.default.removeItem(at: stagedURL)
+        item.addDetailLine("SFTP closed; retrying with rsync")
+        ConnectionLog.shared.log(
+            "SFTP download failed for \(name); retrying with rsync",
+            level: .warning,
+            session: session.name
+        )
+        rsyncTransfer(
+            from: Self.rsyncRemoteLocation(session: session, path: remotePath),
+            to: stagedURL.path,
+            session: session,
+            item: item,
+            completeOnSuccess: false,
+            isDirectory: false
+        ) { [weak self] succeeded in
+            guard let self else {
+                completion?()
+                return
+            }
+            guard succeeded else {
+                try? FileManager.default.removeItem(at: stagedURL)
+                completion?()
+                return
+            }
+            self._finaliseDownload(
+                stagedURL: stagedURL,
+                localURL: localURL,
+                name: name,
+                item: item,
+                session: session,
+                completion: completion
+            )
         }
     }
 
@@ -1690,7 +1756,11 @@ class SFTPManager: ObservableObject {
     }
 
     private func remoteLocation(session: Session, path: String) -> String {
-        "\(rsyncTarget(session)):\(Self.rsyncRemotePath(path))"
+        Self.rsyncRemoteLocation(session: session, path: path)
+    }
+
+    nonisolated static func rsyncRemoteLocation(session: Session, path: String) -> String {
+        "\(SSHSecurity.rsyncTarget(for: session)):\(Self.rsyncRemotePath(path))"
     }
 
     private func sftpTransfer(commands: [String], session: Session,
@@ -2137,7 +2207,7 @@ class SFTPManager: ObservableObject {
         return sftpLocalPath(value)
     }
 
-    private static func rsyncRemotePath(_ value: String) -> String {
+    nonisolated private static func rsyncRemotePath(_ value: String) -> String {
         if value.isEmpty { return "." }
 
         let safeCharacters = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789/._-~")

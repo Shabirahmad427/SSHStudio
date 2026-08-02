@@ -485,4 +485,23 @@ struct Phase4SFTPTests {
         #expect(command.contains("find ") == false)
         #expect(command.contains("get -a -R"))
     }
+
+    @Test func singleFileDownloadRsyncFallbackPreservesProxyJumpAliasAndDifficultPaths() {
+        let session = Session(
+            name: "clauberh",
+            host: "clauberh",
+            username: "clauberh",
+            authentication: .sshConfigManaged,
+            sshConfigAlias: "clauberh"
+        )
+        let remotePath = #"/home/users/clauberh/project dir/unicode-é/quoted "name"/--leading/00_PMF_CRD-distance-WAT.py"#
+
+        let location = SFTPManager.rsyncRemoteLocation(session: session, path: remotePath)
+
+        #expect(location.hasPrefix("clauberh@clauberh:"))
+        #expect(location.contains(#"project\ dir"#))
+        #expect(location.contains(#"quoted\ \"#))
+        #expect(location.contains(#"--leading"#))
+        #expect(location.contains("00_PMF_CRD-distance-WAT.py"))
+    }
 }
