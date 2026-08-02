@@ -781,6 +781,19 @@ class SFTPManager: ObservableObject {
         guard !remoteItems.isEmpty else { completion?(); return }
         guard let session = self.session else { return }
 
+        if Self.shouldUseSingleFileDownloadPipeline(remoteItems: remoteItems),
+           let remoteItem = remoteItems.first {
+            download(
+                remotePath: remoteItem.remotePath,
+                name: remoteItem.name,
+                isDirectory: false,
+                to: localURL.appendingPathComponent(remoteItem.name),
+                session: session,
+                completion: completion
+            )
+            return
+        }
+
         let itemName = remoteItems.count == 1 ? remoteItems[0].name : "\(remoteItems.count) items"
         let item = TransferItem(name: itemName, direction: .download)
         item.profileLabel = "SFTP batch"
@@ -1761,6 +1774,12 @@ class SFTPManager: ObservableObject {
 
     nonisolated static func rsyncRemoteLocation(session: Session, path: String) -> String {
         "\(SSHSecurity.rsyncTarget(for: session)):\(Self.rsyncRemotePath(path))"
+    }
+
+    nonisolated static func shouldUseSingleFileDownloadPipeline(
+        remoteItems: [(remotePath: String, name: String, isDirectory: Bool)]
+    ) -> Bool {
+        remoteItems.count == 1 && remoteItems.first?.isDirectory == false
     }
 
     private func sftpTransfer(commands: [String], session: Session,

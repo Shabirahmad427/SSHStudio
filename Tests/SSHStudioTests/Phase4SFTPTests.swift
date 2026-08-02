@@ -504,4 +504,21 @@ struct Phase4SFTPTests {
         #expect(location.contains(#"--leading"#))
         #expect(location.contains("00_PMF_CRD-distance-WAT.py"))
     }
+
+    @Test func singleFileBatchDownloadsUseFallbackCapablePipeline() {
+        #expect(SFTPManager.shouldUseSingleFileDownloadPipeline(remoteItems: [
+            (
+                remotePath: "/remote/0-pmf2/00_PMF_CRD-distance-WAT.py",
+                name: "00_PMF_CRD-distance-WAT.py",
+                isDirectory: false
+            )
+        ]))
+        #expect(!SFTPManager.shouldUseSingleFileDownloadPipeline(remoteItems: [
+            (remotePath: "/remote/a.py", name: "a.py", isDirectory: false),
+            (remotePath: "/remote/b.py", name: "b.py", isDirectory: false)
+        ]))
+        #expect(!SFTPManager.shouldUseSingleFileDownloadPipeline(remoteItems: [
+            (remotePath: "/remote/folder", name: "folder", isDirectory: true)
+        ]))
+    }
 }
