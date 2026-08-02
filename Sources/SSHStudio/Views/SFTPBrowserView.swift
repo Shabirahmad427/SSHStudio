@@ -2,6 +2,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 private let filePayloadPasteboardType = NSPasteboard.PasteboardType("com.sshstudio.file-payloads")
+private let sftpClipboardPasteboardType = NSPasteboard.PasteboardType("com.sshstudio.sftp-clipboard")
 
 // MARK: - Main SFTP Browser
 
@@ -405,6 +406,34 @@ private func filePayloadsFromPasteboard() -> [FileDragPayload] {
           let payloads = try? JSONDecoder().decode([FileDragPayload].self, from: data)
     else { return [] }
     return payloads
+}
+
+private func pasteboardHasFilePayloads() -> Bool {
+    NSPasteboard.general.data(forType: filePayloadPasteboardType) != nil
+        || NSPasteboard.general.data(forType: sftpClipboardPasteboardType) != nil
+}
+
+private func copyRemoteItemsToPasteboard(
+    _ items: [SFTPClipboardItem],
+    sourceProfileID: UUID,
+    operation: SFTPClipboardOperation
+) {
+    guard !items.isEmpty,
+          let data = try? JSONEncoder().encode(SFTPClipboardPayload(
+            sourceProfileID: sourceProfileID,
+            items: items,
+            operation: operation,
+            timestamp: Date()
+          ))
+    else { return }
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setData(data, forType: sftpClipboardPasteboardType)
+    NSPasteboard.general.setString(items.map(\.path).joined(separator: "\n"), forType: .string)
+}
+
+private func sftpClipboardFromPasteboard() -> SFTPClipboardPayload? {
+    guard let data = NSPasteboard.general.data(forType: sftpClipboardPasteboardType) else { return nil }
+    return try? JSONDecoder().decode(SFTPClipboardPayload.self, from: data)
 }
 
 private final class DropCollector<Value>: @unchecked Sendable {
@@ -892,8 +921,34 @@ struct RemotePaneView: View {
                 onNavigatePath: { sftp.listFiles(at: $0) },
                 onRefresh: { sftp.listFiles(at: sftp.currentPath, pushHistory: false, forceRefresh: true) },
                 onHome: { sftp.goHome(for: session) },
+                onRoot: { sftp.listFiles(at: "/") },
                 onNewFolder: { showNewFolder = true },
-                onNewFile: { showNewFile = true }
+                onNewFile: { showNewFile = true },
+                canPaste: pasteboardHasFilePayloads(),
+                onPaste: {
+                    if let payload = sftpClipboardFromPasteboard() {
+                        switch payload.operation {
+                        case .copy:
+                            onDrop(payload.items.map {
+                                FileDragPayload(
+                                    origin: .remote,
+                                    path: $0.path,
+                                    name: $0.name,
+                                    isDirectory: $0.isDirectory,
+                                    sessionID: payload.sourceProfileID
+                                )
+                            })
+                        case .move:
+                            guard payload.sourceProfileID == session.id else {
+                                sftp.error = "Cross-server move is not supported. Copy the item, then delete the original after the copy completes."
+                                return
+                            }
+                            sftp.moveClipboardItemsSameServer(payload.items, to: sftp.currentPath, session: session)
+                        }
+                    } else {
+                        onDrop(filePayloadsFromPasteboard())
+                    }
+                }
             )
 
             // Date filter bar
@@ -1170,6 +1225,13 @@ struct RemoteFileList: View {
     let onDropEnter: () -> Void
     let onDropExit: () -> Void
 
+    struct PendingRemotePaste: Identifiable {
+        let id = UUID()
+        let payload: SFTPClipboardPayload
+        let destinationPath: String
+        let conflicts: [String]
+    }
+
     @State private var openingFile: String?
     @State private var selectedFiles: Set<String> = []
     @State private var renameTarget: RemoteFile?
@@ -1180,17 +1242,33 @@ struct RemoteFileList: View {
     @State private var newFolderName = ""
     @State private var showNewFolder = false
     @State private var showNewFile = false
+    @State private var selection = SFTPSelectionReducer()
+    @State private var pendingPaste: PendingRemotePaste?
+    @State private var pendingDelete: [RemoteFile] = []
+    @State private var cutClipboard: SFTPClipboardPayload?
+    @State private var isPasting = false
+    @FocusState private var hasSFTPFocus: Bool
 
     var body: some View {
         List(selection: $selectedFiles) {
             ForEach(files) { file in
-                Button {
-                    if file.isDirectory { onNavigate(file.name) }
-                    else { openInEditor(file) }
-                } label: {
-                    remoteFileRow(file)
+                remoteFileRow(file)
+                .contentShape(Rectangle())
+                .opacity(isCut(file) ? 0.45 : 1)
+                .onTapGesture(count: 2) {
+                    selectFile(file, event: .single(file.id))
+                    openFileOrDirectory(file)
                 }
-                .buttonStyle(.plain)
+                .onTapGesture(count: 1) {
+                    let flags = NSEvent.modifierFlags
+                    if flags.contains(.shift) {
+                        selectFile(file, event: .shift(file.id))
+                    } else if flags.contains(.command) {
+                        selectFile(file, event: .command(file.id))
+                    } else {
+                        selectFile(file, event: .single(file.id))
+                    }
+                }
                 .contextMenu { remoteContextMenu(for: file) }
                 .tag(file.id)
                 .onDrag { FileDragPayload.remote(file, currentPath: sftp.currentPath, sessionID: session.id).itemProvider }
@@ -1198,13 +1276,21 @@ struct RemoteFileList: View {
             Color.clear
                 .frame(minHeight: 160)
                 .contentShape(Rectangle())
+                .onTapGesture {
+                    clearSelection()
+                }
                 .contextMenu { emptySpaceContextMenu }
                 .listRowInsets(EdgeInsets())
                 .listRowSeparator(.hidden)
         }
         .listStyle(.plain)
+        .focused($hasSFTPFocus)
         .focusable()
         .contextMenu { emptySpaceContextMenu }
+        .onChange(of: files.map(\.id)) { _, ids in
+            selection.apply(.preserve(availableIDs: ids), orderedIDs: ids)
+            selectedFiles = selection.selectedIDs
+        }
         .overlay {
             TransferDropHighlight(isTargeted: isDropTarget, title: "Drop to upload")
         }
@@ -1239,20 +1325,55 @@ struct RemoteFileList: View {
             copySelectedRemoteFiles()
             return .handled
         }
+        // ⌘X — cut selected remote files/folders for same-profile move
+        .onKeyPress(.init("x"), phases: .down) { press in
+            guard press.modifiers == [.command] else { return .ignored }
+            cutSelectedRemoteFiles()
+            return .handled
+        }
         // ⌘V — paste copied local or remote files/folders into this remote directory
         .onKeyPress(.init("v"), phases: .down) { press in
             guard press.modifiers == [.command] else { return .ignored }
             pasteIntoRemotePane()
             return .handled
         }
+        .onKeyPress(.init("o"), phases: .down) { press in
+            guard press.modifiers == [.command] else { return .ignored }
+            openSelected()
+            return .handled
+        }
+        .onKeyPress(.init("r"), phases: .down) { press in
+            guard press.modifiers == [.command] else { return .ignored }
+            sftp.listFiles(at: sftp.currentPath, pushHistory: false, forceRefresh: true)
+            return .handled
+        }
+        .onKeyPress(.init("["), phases: .down) { press in
+            guard press.modifiers == [.command] else { return .ignored }
+            sftp.goBack()
+            return .handled
+        }
+        .onKeyPress(.init("]"), phases: .down) { press in
+            guard press.modifiers == [.command] else { return .ignored }
+            sftp.goForward()
+            return .handled
+        }
+        .onKeyPress(.upArrow, phases: .down) { press in
+            guard press.modifiers == [.command] else { return .ignored }
+            goToParentDirectory()
+            return .handled
+        }
         // ⌘Delete or Backspace — delete selected
         .onKeyPress(.deleteForward, phases: .down) { press in
             guard press.modifiers.contains(.command) else { return .ignored }
-            deleteSelected()
+            confirmDeleteSelected()
             return .handled
         }
         .onKeyPress(.delete, phases: .down) { _ in
-            deleteSelected()
+            confirmDeleteSelected()
+            return .handled
+        }
+        .onKeyPress(.return, phases: .down) { _ in
+            beginRenameSelected()
             return .handled
         }
         .toolbar {
@@ -1302,6 +1423,34 @@ struct RemoteFileList: View {
                  ? "This will permanently delete the folder and all its contents."
                  : "This file will be permanently deleted.")
         }
+        .alert(
+            "Delete \(pendingDelete.count) selected item\(pendingDelete.count == 1 ? "" : "s")?",
+            isPresented: Binding(get: { !pendingDelete.isEmpty }, set: { if !$0 { pendingDelete = [] } })
+        ) {
+            Button("Delete", role: .destructive) {
+                let files = pendingDelete
+                pendingDelete = []
+                selectedFiles.removeAll()
+                selection.apply(.empty, orderedIDs: orderedFileIDs)
+                sftp.deleteMany(files: files)
+            }
+            Button("Cancel", role: .cancel) { pendingDelete = [] }
+        } message: {
+            Text("This permanently deletes the selected remote item\(pendingDelete.count == 1 ? "" : "s").")
+        }
+        .alert(item: $pendingPaste) { paste in
+            Alert(
+                title: Text("Replace Existing Item\(paste.conflicts.count == 1 ? "" : "s")?"),
+                message: Text(paste.conflicts.joined(separator: "\n")),
+                primaryButton: .destructive(Text("Replace")) {
+                    runPaste(paste.payload, destinationPath: paste.destinationPath, overwrite: true)
+                },
+                secondaryButton: .cancel {
+                    isPasting = false
+                    pendingPaste = nil
+                }
+            )
+        }
         // Permissions sheet
         .sheet(item: $permTarget) { file in
             PermissionsSheet(fileName: file.name, initialMode: file.permissions) { mode in
@@ -1323,6 +1472,35 @@ struct RemoteFileList: View {
 
     @ViewBuilder
     private var emptySpaceContextMenu: some View {
+        Button { uploadFromOpenPanel() } label: {
+            Label("Upload…", systemImage: "arrow.up.doc")
+        }
+        if !selectedFiles.isEmpty {
+            Button { copySelectedRemoteFiles() } label: {
+                Label("Copy Selected", systemImage: "doc.on.doc")
+            }
+        }
+        Button { pasteIntoRemotePane() } label: {
+            Label("Paste Into This Folder", systemImage: "doc.on.clipboard")
+        }
+        .disabled(!pasteboardHasFilePayloads())
+        Divider()
+        Button { sftp.goBack() } label: {
+            Label("Back", systemImage: "chevron.left")
+        }
+        .disabled(!sftp.canGoBack)
+        Button { sftp.goForward() } label: {
+            Label("Forward", systemImage: "chevron.right")
+        }
+        .disabled(!sftp.canGoForward)
+        Button { goToParentDirectory() } label: {
+            Label("Parent Folder", systemImage: "arrow.up")
+        }
+        .disabled(parentPath == nil)
+        Button { sftp.goHome(for: session) } label: {
+            Label("Home", systemImage: "house")
+        }
+        Divider()
         Button { showNewFolder = true } label: {
             Label("New Folder", systemImage: "folder.badge.plus")
         }
@@ -1331,7 +1509,7 @@ struct RemoteFileList: View {
         }
         if !selectedFiles.isEmpty {
             Divider()
-            Button(role: .destructive) { deleteSelected() } label: {
+            Button(role: .destructive) { confirmDeleteSelected() } label: {
                 Label("Delete Selected", systemImage: "trash")
             }
         }
@@ -1339,27 +1517,238 @@ struct RemoteFileList: View {
         Button { sftp.listFiles(at: sftp.currentPath, pushHistory: false, forceRefresh: true) } label: {
             Label("Refresh", systemImage: "arrow.clockwise")
         }
+        Button {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(sftp.currentPath, forType: .string)
+        } label: {
+            Label("Copy Current Directory Path", systemImage: "doc.on.doc")
+        }
+    }
+
+    private var orderedFileIDs: [String] {
+        files.map(\.id)
+    }
+
+    private func selectFile(_ file: RemoteFile, event: SFTPSelectionEvent) {
+        selection.apply(event, orderedIDs: orderedFileIDs)
+        selectedFiles = selection.selectedIDs
+        hasSFTPFocus = true
+    }
+
+    private func clearSelection() {
+        selection.apply(.empty, orderedIDs: orderedFileIDs)
+        selectedFiles.removeAll()
+        hasSFTPFocus = true
+    }
+
+    private func selectForContextIfNeeded(_ file: RemoteFile) {
+        guard !selectedFiles.contains(file.id) else { return }
+        selectFile(file, event: .single(file.id))
+    }
+
+    private func selectedRemoteFiles(fallback file: RemoteFile? = nil) -> [RemoteFile] {
+        let selected = files.filter { selectedFiles.contains($0.id) }
+        if !selected.isEmpty { return selected }
+        if let file { return [file] }
+        return []
+    }
+
+    private func remoteClipboardItems(for files: [RemoteFile]) -> [SFTPClipboardItem] {
+        files.map {
+            SFTPClipboardItem(
+                path: SFTPManager.childPath(parent: sftp.currentPath, child: $0.name),
+                name: $0.name,
+                isDirectory: $0.isDirectory
+            )
+        }
+    }
+
+    private func openFileOrDirectory(_ file: RemoteFile) {
+        if file.isDirectory {
+            onNavigate(file.name)
+        } else {
+            openInEditor(file)
+        }
+    }
+
+    private func openSelected() {
+        guard let file = selectedRemoteFiles().first else { return }
+        openFileOrDirectory(file)
+    }
+
+    private func beginRenameSelected() {
+        guard selectedFiles.count == 1,
+              let file = files.first(where: { selectedFiles.contains($0.id) })
+        else { return }
+        renameText = file.name
+        renameTarget = file
+    }
+
+    private func confirmDeleteSelected() {
+        let toDelete = selectedRemoteFiles()
+        guard !toDelete.isEmpty else { return }
+        pendingDelete = toDelete
+    }
+
+    private var parentPath: String? {
+        let path = sftp.currentPath
+        guard path != "~", path != "/", path != ".", !path.isEmpty else { return nil }
+
+        if path.hasPrefix("~/") {
+            let parts = String(path.dropFirst(2)).split(separator: "/").map(String.init)
+            let parentParts = parts.dropLast()
+            return parentParts.isEmpty ? "~" : "~/" + parentParts.joined(separator: "/")
+        }
+
+        let parent = (path as NSString).deletingLastPathComponent
+        if path.hasPrefix("/") {
+            return parent.isEmpty ? "/" : parent
+        }
+        return parent.isEmpty ? "." : parent
+    }
+
+    private func goToParentDirectory() {
+        guard let parentPath else { return }
+        sftp.listFiles(at: parentPath)
     }
 
     private func deleteSelected() {
         let toDelete = files.filter { selectedFiles.contains($0.id) }
         guard !toDelete.isEmpty else { return }
         selectedFiles.removeAll()
+        selection.apply(.empty, orderedIDs: orderedFileIDs)
         sftp.deleteMany(files: toDelete)
     }
 
     private func copySelectedRemoteFiles() {
-        let selected = files.filter { selectedFiles.contains($0.id) }
-        let payloads = selected.map {
-            FileDragPayload.remote($0, currentPath: sftp.currentPath, sessionID: session.id)
-        }
-        copyFilePayloadsToPasteboard(payloads)
+        let selected = selectedRemoteFiles()
+        copyRemoteItemsToPasteboard(
+            remoteClipboardItems(for: selected),
+            sourceProfileID: session.id,
+            operation: .copy
+        )
+        cutClipboard = nil
+    }
+
+    private func cutSelectedRemoteFiles() {
+        let selected = selectedRemoteFiles()
+        let items = remoteClipboardItems(for: selected)
+        copyRemoteItemsToPasteboard(items, sourceProfileID: session.id, operation: .move)
+        cutClipboard = SFTPClipboardPayload(
+            sourceProfileID: session.id,
+            items: items,
+            operation: .move,
+            timestamp: Date()
+        )
+    }
+
+    private func copyRemoteFilesForContext(_ file: RemoteFile) {
+        selectForContextIfNeeded(file)
+        let filesToCopy = selectedRemoteFiles(fallback: file)
+        copyRemoteItemsToPasteboard(
+            remoteClipboardItems(for: filesToCopy),
+            sourceProfileID: session.id,
+            operation: .copy
+        )
+        cutClipboard = nil
     }
 
     private func pasteIntoRemotePane() {
+        pasteIntoRemotePane(destinationPath: selectedDirectoryPath ?? sftp.currentPath)
+    }
+
+    private func pasteIntoRemotePane(destinationPath: String) {
+        guard !isPasting else { return }
+        if let payload = sftpClipboardFromPasteboard() {
+            guard !payload.isEmpty else { return }
+            isPasting = true
+            let conflicts = SFTPConflictPolicy.conflictingNames(
+                sourceNames: payload.items.map(\.name),
+                destinationNames: files.map(\.name)
+            )
+            if !conflicts.isEmpty {
+                pendingPaste = PendingRemotePaste(payload: payload, destinationPath: destinationPath, conflicts: conflicts)
+                return
+            }
+            runPaste(payload, destinationPath: destinationPath, overwrite: false)
+            return
+        }
+
         let payloads = filePayloadsFromPasteboard()
         guard !payloads.isEmpty else { return }
         onDrop(payloads)
+    }
+
+    private var selectedDirectoryPath: String? {
+        guard selectedFiles.count == 1,
+              let directory = files.first(where: { selectedFiles.contains($0.id) && $0.isDirectory })
+        else { return nil }
+        return SFTPManager.childPath(parent: sftp.currentPath, child: directory.name)
+    }
+
+    private func runPaste(_ payload: SFTPClipboardPayload, destinationPath: String, overwrite: Bool) {
+        defer {
+            pendingPaste = nil
+        }
+
+        switch payload.operation {
+        case .copy:
+            let payloads = payload.items.map {
+                FileDragPayload(
+                    origin: .remote,
+                    path: $0.path,
+                    name: $0.name,
+                    isDirectory: $0.isDirectory,
+                    sessionID: payload.sourceProfileID
+                )
+            }
+            onDrop(payloads)
+            isPasting = false
+        case .move:
+            guard payload.sourceProfileID == session.id else {
+                sftp.error = "Cross-server move is not supported. Copy the item, then delete the original after the copy completes."
+                isPasting = false
+                return
+            }
+            sftp.moveClipboardItemsSameServer(
+                payload.items,
+                to: destinationPath,
+                session: session,
+                overwrite: overwrite
+            ) { succeeded in
+                isPasting = false
+                if succeeded {
+                    cutClipboard = nil
+                    NSPasteboard.general.clearContents()
+                }
+            }
+        }
+    }
+
+    private func isCut(_ file: RemoteFile) -> Bool {
+        guard let cutClipboard, cutClipboard.operation == .move, cutClipboard.sourceProfileID == session.id else { return false }
+        let path = SFTPManager.childPath(parent: sftp.currentPath, child: file.name)
+        return cutClipboard.items.contains { $0.path == path }
+    }
+
+    private func uploadFromOpenPanel() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = true
+        panel.begin { response in
+            guard response == .OK else { return }
+            let payloads = panel.urls.map {
+                FileDragPayload(
+                    origin: .local,
+                    path: $0.path,
+                    name: $0.lastPathComponent,
+                    isDirectory: ((try? $0.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false),
+                    sessionID: nil
+                )
+            }
+            onDrop(payloads)
+        }
     }
 
     private var dropTargetBinding: Binding<Bool> {
@@ -1442,17 +1831,28 @@ struct RemoteFileList: View {
     @ViewBuilder
     private func remoteContextMenu(for file: RemoteFile) -> some View {
         if file.isDirectory {
-            Button { onNavigate(file.name) } label: { Label("Open Folder", systemImage: "folder") }
-            Button { onDownload(file) } label: { Label("Download Folder", systemImage: "arrow.down.doc.fill") }
+            Button {
+                selectForContextIfNeeded(file)
+                onNavigate(file.name)
+            } label: { Label("Open", systemImage: "folder") }
         } else {
-            Button { openInEditor(file) } label: { Label("Open", systemImage: "arrow.up.forward.app") }
+            Button {
+                selectForContextIfNeeded(file)
+                openInEditor(file)
+            } label: { Label("Open", systemImage: "arrow.up.forward.app") }
             if let vsCode = quickEditorURL(bundleID: "com.microsoft.VSCode") {
-                Button { openInApp(file, appURL: vsCode) } label: {
+                Button {
+                    selectForContextIfNeeded(file)
+                    openInApp(file, appURL: vsCode)
+                } label: {
                     Label("Open in VS Code", systemImage: "chevron.left.forwardslash.chevron.right")
                 }
             }
             if let notepadpp = quickEditorURL(bundleID: "com.rizaldovinaldy.notepadplusplus") {
-                Button { openInApp(file, appURL: notepadpp) } label: {
+                Button {
+                    selectForContextIfNeeded(file)
+                    openInApp(file, appURL: notepadpp)
+                } label: {
                     Label("Open in Notepad++", systemImage: "doc.plaintext")
                 }
             }
@@ -1460,6 +1860,7 @@ struct RemoteFileList: View {
             Menu {
                 ForEach(apps, id: \.self) { appURL in
                     Button {
+                        selectForContextIfNeeded(file)
                         openInApp(file, appURL: appURL)
                     } label: {
                         Label(
@@ -1470,6 +1871,7 @@ struct RemoteFileList: View {
                 }
                 if !apps.isEmpty { Divider() }
                 Button {
+                    selectForContextIfNeeded(file)
                     pickAppAndOpen(file)
                 } label: {
                     Label("Other…", systemImage: "ellipsis.circle")
@@ -1477,31 +1879,78 @@ struct RemoteFileList: View {
             } label: {
                 Label("Open With", systemImage: "arrow.up.forward.app")
             }
-            Button { onDownload(file) } label: { Label("Download", systemImage: "arrow.down.circle") }
+        }
+        Button {
+            selectForContextIfNeeded(file)
+            let toDownload = selectedRemoteFiles(fallback: file)
+            if toDownload.count == 1, let first = toDownload.first {
+                onDownload(first)
+            } else {
+                onDownloadMany(toDownload)
+            }
+        } label: { Label("Download", systemImage: file.isDirectory ? "arrow.down.doc.fill" : "arrow.down.circle") }
+        Divider()
+        Button {
+            copyRemoteFilesForContext(file)
+        } label: {
+            Label(selectedFiles.contains(file.id) && selectedFiles.count > 1 ? "Copy Selected" : "Copy", systemImage: "doc.on.doc")
+        }
+        Button {
+            selectForContextIfNeeded(file)
+            let destination = file.isDirectory
+                ? SFTPManager.childPath(parent: sftp.currentPath, child: file.name)
+                : (selectedDirectoryPath ?? sftp.currentPath)
+            pasteIntoRemotePane(destinationPath: destination)
+        } label: {
+            Label("Paste Into This Folder", systemImage: "doc.on.clipboard")
+        }
+        .disabled(!pasteboardHasFilePayloads())
+        Button {
+            selectForContextIfNeeded(file)
+            cutSelectedRemoteFiles()
+        } label: {
+            Label(selectedFiles.contains(file.id) && selectedFiles.count > 1 ? "Cut Selected" : "Cut", systemImage: "scissors")
         }
         Divider()
         Button {
+            selectForContextIfNeeded(file)
             renameText = file.name
             renameTarget = file
         } label: { Label("Rename…", systemImage: "pencil") }
         Button {
+            selectForContextIfNeeded(file)
             let ext = (file.name as NSString).pathExtension
             let base = (file.name as NSString).deletingPathExtension
             let copyName = ext.isEmpty ? "\(base) copy" : "\(base) copy.\(ext)"
             sftp.copyFile(file, to: copyName)
         } label: { Label("Duplicate", systemImage: "doc.on.doc") }
         Button {
+            selectForContextIfNeeded(file)
             permText = file.permissions
             permTarget = file
-        } label: { Label("Change Permissions…", systemImage: "lock.rotation") }
+        } label: { Label("Properties/Permissions…", systemImage: "lock.rotation") }
         Divider()
         Button {
             let path = SFTPManager.childPath(parent: sftp.currentPath, child: file.name)
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(path, forType: .string)
-        } label: { Label("Copy Path", systemImage: "doc.on.doc") }
+        } label: { Label("Copy Remote Path", systemImage: "doc.on.doc") }
+        Button { showNewFolder = true } label: {
+            Label("New Folder", systemImage: "folder.badge.plus")
+        }
+        Button { sftp.listFiles(at: sftp.currentPath, pushHistory: false, forceRefresh: true) } label: {
+            Label("Refresh", systemImage: "arrow.clockwise")
+        }
         Divider()
-        Button(role: .destructive) { deleteTarget = file } label: { Label("Delete", systemImage: "trash") }
+        Button(role: .destructive) {
+            selectForContextIfNeeded(file)
+            let toDelete = selectedRemoteFiles(fallback: file)
+            if toDelete.count == 1 {
+                deleteTarget = toDelete[0]
+            } else {
+                pendingDelete = toDelete
+            }
+        } label: { Label("Delete", systemImage: "trash") }
     }
 
     private func openInEditor(_ file: RemoteFile) {
@@ -1794,8 +2243,11 @@ struct PaneHeader: View {
     var onNavigatePath: ((String) -> Void)? = nil
     var onRefresh: (() -> Void)? = nil
     var onHome: (() -> Void)? = nil
+    var onRoot: (() -> Void)? = nil
     var onNewFolder: (() -> Void)? = nil
     var onNewFile: (() -> Void)? = nil
+    var canPaste: Bool = false
+    var onPaste: (() -> Void)? = nil
     @State private var isEditingPath = false
     @State private var draftPath = ""
     @FocusState private var pathFieldFocused: Bool
@@ -1888,6 +2340,52 @@ struct PaneHeader: View {
             .onTapGesture(count: 2) {
                 beginPathEditing()
             }
+            .contextMenu {
+                Button { copyToPasteboard(path) } label: {
+                    Label("Copy Current Directory Path", systemImage: "doc.on.doc")
+                }
+                Button { copyToPasteboard("cd \(shellPathForCommand(path))") } label: {
+                    Label("Copy cd Command", systemImage: "terminal")
+                }
+                if let onPaste {
+                    Button { onPaste() } label: {
+                        Label("Paste Into This Folder", systemImage: "doc.on.clipboard")
+                    }
+                    .disabled(!canPaste)
+                }
+                Divider()
+                Button { onBack() } label: {
+                    Label("Back", systemImage: "chevron.left")
+                }
+                .disabled(!canGoBack)
+                Button { onForward?() } label: {
+                    Label("Forward", systemImage: "chevron.right")
+                }
+                .disabled(!canGoForward)
+                Button {
+                    if let parentPath {
+                        onNavigatePath?(parentPath)
+                    }
+                } label: {
+                    Label("Parent Directory", systemImage: "arrow.up")
+                }
+                .disabled(parentPath == nil || onNavigatePath == nil)
+                if let onHome {
+                    Button { onHome() } label: {
+                        Label("Home", systemImage: "house")
+                    }
+                }
+                if let onRoot {
+                    Button { onRoot() } label: {
+                        Label("Filesystem Root", systemImage: "internaldrive")
+                    }
+                }
+                if let onRefresh {
+                    Button { onRefresh() } label: {
+                        Label("Refresh", systemImage: "arrow.clockwise")
+                    }
+                }
+            }
             .onChange(of: path) { _, newPath in
                 if !isEditingPath {
                     draftPath = newPath
@@ -1954,6 +2452,13 @@ struct PaneHeader: View {
                 }
                 .buttonStyle(PaneHeaderButtonStyle())
                 .help("Go to home directory")
+            }
+            if let onRoot {
+                Button { onRoot() } label: {
+                    Image(systemName: "internaldrive").font(.system(size: 9, weight: .bold))
+                }
+                .buttonStyle(PaneHeaderButtonStyle())
+                .help("Go to filesystem root")
             }
             if let onRefresh {
                 Button { onRefresh() } label: {

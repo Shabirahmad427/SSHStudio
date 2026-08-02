@@ -821,6 +821,69 @@ class SFTPManager: ObservableObject {
         }
     }
 
+    func moveClipboardItemsSameServer(
+        _ items: [SFTPClipboardItem],
+        to destinationPath: String,
+        session: Session,
+        overwrite: Bool = false,
+        completion: (@MainActor (Bool) -> Void)? = nil
+    ) {
+        guard !items.isEmpty else {
+            completion?(true)
+            return
+        }
+        guard self.session?.id == session.id else {
+            error = "Move is only available within the same SFTP profile."
+            completion?(false)
+            return
+        }
+
+        let itemName = items.count == 1 ? items[0].name : "\(items.count) items"
+        let transferItem = TransferItem(name: itemName, direction: .serverToServer)
+        transferItem.profileLabel = "SFTP move"
+        TransferQueue.shared.add(transferItem)
+
+        let commands: [String]
+        do {
+            commands = try SFTPMutationBatchBuilder.renameCommands(
+                items: items,
+                destinationPath: destinationPath,
+                overwrite: overwrite
+            )
+        } catch {
+            transferItem.status = .failed(error.localizedDescription)
+            self.error = error.localizedDescription
+            completion?(false)
+            return
+        }
+
+        transferItem.status = .inProgress
+        transferItem.startedAt = Date()
+        sftpTransfer(commands: commands, session: session, item: transferItem, isDirectory: items.contains(where: \.isDirectory)) { [weak self] succeeded in
+            guard let self else {
+                completion?(false)
+                return
+            }
+            if succeeded {
+                transferItem.status = .completed
+                transferItem.percentDone = 100
+                self.error = nil
+                let sourceParents = Set(items.compactMap { Self.remoteParentPath($0.path) })
+                sourceParents.forEach { self.invalidateCache(for: $0) }
+                self.invalidateCache(for: destinationPath)
+                self.listFiles(at: self.currentPath, pushHistory: false, forceRefresh: true)
+                ConnectionLog.shared.log(
+                    "Moved \(itemName) to \(destinationPath)",
+                    level: .success,
+                    session: session.name
+                )
+            } else if case .failed(let message) = transferItem.status {
+                self.error = "Move failed: \(message)"
+            }
+            completion?(succeeded)
+        }
+    }
+
     func downloadMany(files: [RemoteFile], to localURL: URL, session: Session, completion: (@MainActor () -> Void)? = nil) {
         guard !files.isEmpty else { completion?(); return }
         let items = files.map { file in

@@ -184,4 +184,170 @@ struct Phase4SFTPTests {
         #expect(EditableRemotePathInput.committedPath(from: "  ~/work/project  ") == "~/work/project")
         #expect(EditableRemotePathInput.committedPath(from: "\n\t  ") == nil)
     }
+
+    @Test func finderStyleSelectionSupportsSingleCommandShiftAndPreserve() {
+        let ids = ["a", "b", "c", "d"]
+        var selection = SFTPSelectionReducer()
+
+        selection.apply(.single("b"), orderedIDs: ids)
+        #expect(selection.selectedIDs == ["b"])
+
+        selection.apply(.command("d"), orderedIDs: ids)
+        #expect(selection.selectedIDs == ["b", "d"])
+
+        selection.apply(.shift("a"), orderedIDs: ids)
+        #expect(selection.selectedIDs == ["a", "b", "c", "d"])
+
+        selection.apply(.preserve(availableIDs: ["a", "d"]), orderedIDs: ["a", "d"])
+        #expect(selection.selectedIDs == ["a", "d"])
+
+        selection.apply(.empty, orderedIDs: ids)
+        #expect(selection.selectedIDs.isEmpty)
+    }
+
+    @Test func sftpKeyboardShortcutsRequireSFTPFocusAndAvoidTerminalFocus() {
+        #expect(SFTPKeyboardRouter.command(
+            key: "c",
+            modifiers: ["command"],
+            sftpHasFocus: true,
+            terminalHasFocus: false
+        ) == .copy)
+        #expect(SFTPKeyboardRouter.command(
+            key: "c",
+            modifiers: ["command"],
+            sftpHasFocus: true,
+            terminalHasFocus: true
+        ) == nil)
+        #expect(SFTPKeyboardRouter.command(
+            key: "[",
+            modifiers: ["command"],
+            sftpHasFocus: true,
+            terminalHasFocus: false
+        ) == .back)
+        #expect(SFTPKeyboardRouter.command(
+            key: "up",
+            modifiers: ["command"],
+            sftpHasFocus: true,
+            terminalHasFocus: false
+        ) == .parent)
+    }
+
+    @Test func navigationHistorySupportsBackForwardParentInputs() throws {
+        let history = NavigationHistory<String>(initial: "/")
+        history.navigate(to: "/media")
+        history.navigate(to: "/media/shabir")
+
+        #expect(history.current == "/media/shabir")
+        #expect(history.canGoBack)
+        history.goBack()
+        #expect(history.current == "/media")
+        #expect(history.canGoForward)
+        history.goForward()
+        #expect(history.current == "/media/shabir")
+
+        #expect(try SFTPPath("/media/shabir").parent().rawValue == "/media")
+    }
+
+    @Test func typedSFTPClipboardPayloadRoundTripsCopyAndCutState() throws {
+        let profileID = UUID()
+        let item = SFTPClipboardItem(
+            path: "/media/shabir/Project Files/quoted ' name",
+            name: "quoted ' name",
+            isDirectory: false
+        )
+        let payload = SFTPClipboardPayload(
+            sourceProfileID: profileID,
+            items: [item],
+            operation: .move,
+            timestamp: Date(timeIntervalSince1970: 42)
+        )
+
+        let decoded = try JSONDecoder().decode(SFTPClipboardPayload.self, from: JSONEncoder().encode(payload))
+
+        #expect(decoded == payload)
+        #expect(decoded.operation == .move)
+        #expect(decoded.sourceProfileID == profileID)
+    }
+
+    @Test func sameServerMoveBuildsSFTPRenameCommandsForDifficultPaths() throws {
+        let items = [
+            SFTPClipboardItem(
+                path: #"/media/shabir/Project Files/--leading "quote".txt"#,
+                name: #"--leading "quote".txt"#,
+                isDirectory: false
+            ),
+            SFTPClipboardItem(
+                path: "/media/shabir/unicode-é",
+                name: "unicode-é",
+                isDirectory: true
+            )
+        ]
+
+        let commands = try SFTPMutationBatchBuilder.renameCommands(
+            items: items,
+            destinationPath: "/media/shabir/Destination Folder",
+            overwrite: false
+        )
+
+        #expect(commands == [
+            #"rename "/media/shabir/Project Files/--leading \"quote\".txt" "/media/shabir/Destination Folder/--leading \"quote\".txt""#,
+            #"rename "/media/shabir/unicode-é" "/media/shabir/Destination Folder/unicode-é""#
+        ])
+        #expect(commands.joined(separator: "\n").contains("-A") == false)
+    }
+
+    @Test func copyConflictDetectionFindsDestinationNameCollisions() {
+        let conflicts = SFTPConflictPolicy.conflictingNames(
+            sourceNames: ["alpha", "Project Files", "unicode-é"],
+            destinationNames: ["Project Files", "other", "unicode-é"]
+        )
+
+        #expect(conflicts == ["Project Files", "unicode-é"])
+    }
+
+    @Test func transferCancellationTransitionsToCancelled() {
+        let item = TransferItem(name: "copy", direction: .serverToServer)
+        item.status = .inProgress
+
+        item.cancel()
+
+        guard case .cancelled? = item.finishCancellationIfNeeded() else {
+            Issue.record("Expected transfer cancellation state")
+            return
+        }
+    }
+
+    @Test func directoryCacheInvalidatesMutatedPathsOnly() {
+        var cache = SFTPDirectoryCache(ttl: 60, capacity: 10)
+        let profileID = UUID()
+        let otherProfileID = UUID()
+        let key = SFTPListingCacheKey(
+            profileID: profileID,
+            normalizedPath: "/media/shabir",
+            options: SFTPListingOptions(showHiddenFiles: true)
+        )
+        let otherKey = SFTPListingCacheKey(
+            profileID: otherProfileID,
+            normalizedPath: "/media/shabir",
+            options: SFTPListingOptions(showHiddenFiles: true)
+        )
+        let file = RemoteFile(name: "Project Files", isDirectory: true, size: "Folder", permissions: "drwxr-xr-x", modified: "Aug 2", modifiedDate: nil)
+
+        cache.set([file], for: key)
+        cache.set([file], for: otherKey)
+        cache.invalidate(profileID: profileID, path: "/media/shabir")
+
+        #expect(cache.value(for: key) == nil)
+        #expect(cache.value(for: otherKey)?.files == [file])
+    }
+
+    @Test func rightClickUnselectedRowSelectionUsesSingleSelectionRule() {
+        let ids = ["first", "second", "third"]
+        var selection = SFTPSelectionReducer()
+        selection.apply(.single("first"), orderedIDs: ids)
+
+        selection.apply(.single("third"), orderedIDs: ids)
+
+        #expect(selection.selectedIDs == ["third"])
+    }
 }
