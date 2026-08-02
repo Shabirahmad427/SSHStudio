@@ -524,37 +524,54 @@ class SFTPManager: ObservableObject {
         }
     }
 
-    private struct RemoteDownloadEntry {
-        let remotePath: String
-        let localURL: URL
-    }
-
-    private struct RemoteDownloadError: LocalizedError {
-        let message: String
-        var errorDescription: String? { message }
-    }
-
     private func downloadDirectoryTree(remotePath: String, name: String, to localURL: URL,
                                        session: Session, item: TransferItem,
                                        completion: (@MainActor () -> Void)?) {
+        downloadDirectoryTreeWithSFTP(remotePath: remotePath, name: name, to: localURL, session: session, item: item, completion: completion)
+    }
+
+    private func downloadDirectoryTreeWithSFTP(remotePath: String, name: String, to localURL: URL,
+                                               session: Session, item: TransferItem,
+                                               completion: (@MainActor () -> Void)?) {
         do {
             try FileManager.default.createDirectory(
                 at: localURL.deletingLastPathComponent(),
                 withIntermediateDirectories: true
             )
         } catch {
-            item.status = .failed("Could not create local folder: \(error.localizedDescription)")
+            item.status = .failed(SFTPDownloadFailure.localDestinationUnavailable.message + ": \(error.localizedDescription)")
             completion?()
             return
         }
 
-        item.profileLabel = "Fast folder download"
-        rsyncTransfer(
-            from: remoteLocation(session: session, path: remotePath),
-            to: localURL.deletingLastPathComponent().path,
+        guard !FileManager.default.fileExists(atPath: localURL.path) else {
+            item.status = .failed(SFTPDownloadFailure.localDestinationUnavailable.message + ": destination already exists")
+            item.addDetailLine("Choose Replace, Merge, Keep Both, or Cancel before retrying.")
+            completion?()
+            return
+        }
+
+        let partialURL = Self.partialDownloadURL(for: localURL)
+        try? FileManager.default.removeItem(at: partialURL)
+
+        let command: String
+        do {
+            command = try SFTPRecursiveDownloadBuilder.command(
+                remotePath: remotePath,
+                localPartialPath: partialURL.path
+            )
+        } catch {
+            item.status = .failed(SFTPDownloadFailure.remoteDirectoryNotFound.message)
+            completion?()
+            return
+        }
+
+        item.profileLabel = "SFTP recursive download"
+        item.addDetailLine("Recursive SFTP download")
+        sftpTransfer(
+            command: command,
             session: session,
             item: item,
-            completeOnSuccess: true,
             isDirectory: true
         ) { [weak self] succeeded in
             guard let self else {
@@ -562,229 +579,22 @@ class SFTPManager: ObservableObject {
                 return
             }
             if succeeded {
-                ConnectionLog.shared.log(
-                    "Downloaded folder \(name) to \(localURL.path)\(Self.transferSizeSuffix(for: item))",
-                    level: .success,
-                    session: session.name
-                )
-                completion?()
-                return
-            }
-
-            ConnectionLog.shared.log(
-                "Fast folder download failed for \(name); retrying with SFTP",
-                level: .warning,
-                session: session.name
-            )
-            self.downloadDirectoryTreeWithSFTP(
-                remotePath: remotePath,
-                name: name,
-                to: localURL,
-                session: session,
-                item: item,
-                completion: completion
-            )
-        }
-    }
-
-    private func downloadDirectoryTreeWithSFTP(remotePath: String, name: String, to localURL: URL,
-                                               session: Session, item: TransferItem,
-                                               completion: (@MainActor () -> Void)?) {
-        expandRemoteDirectory(remotePath: remotePath, localRoot: localURL) { [weak self] result in
-            guard let self else { return }
-            switch result {
-            case .failure(let message):
-                item.status = .failed(message.localizedDescription)
-                completion?()
-
-            case .success(let expanded):
-                do {
-                    try self.createLocalDirectories(expanded.directories)
-                } catch {
-                    item.status = .failed("Could not create local folders: \(error.localizedDescription)")
-                    completion?()
-                    return
-                }
-
-                guard !expanded.files.isEmpty else {
+                if self.finalizeDirectoryDownload(partialURL: partialURL, localURL: localURL, item: item) {
                     item.status = .completed
                     item.percentDone = 100
                     ConnectionLog.shared.log(
-                        "Created local folder \(localURL.path)",
+                        "Downloaded folder \(name) to \(localURL.path)",
                         level: .success,
                         session: session.name
                     )
-                    completion?()
-                    return
-                }
-
-                self.downloadExpandedFiles(expanded.files, item: item, session: session) { succeeded in
-                    if succeeded {
-                        item.status = .completed
-                        item.percentDone = 100
-                        ConnectionLog.shared.log(
-                            "Downloaded folder \(name) to \(localURL.path)",
-                            level: .success,
-                            session: session.name
-                        )
-                    }
-                    completion?()
-                }
-            }
-        }
-    }
-
-    private func expandAndDownloadRemoteItems(
-        remoteItems: [(remotePath: String, name: String, isDirectory: Bool)],
-        to localURL: URL,
-        session: Session,
-        item: TransferItem,
-        completion: (@MainActor () -> Void)?
-    ) {
-        var pending = remoteItems.count
-        var directories: [URL] = []
-        var files: [RemoteDownloadEntry] = []
-        var failure: String?
-
-        func finishOne() {
-            pending -= 1
-            guard pending == 0 else { return }
-            if let failure {
-                item.status = .failed(failure)
-                completion?()
-                return
-            }
-            do {
-                try createLocalDirectories(directories)
-            } catch {
-                item.status = .failed("Could not create local folders: \(error.localizedDescription)")
-                completion?()
-                return
-            }
-            guard !files.isEmpty else {
-                item.status = .completed
-                item.percentDone = 100
-                completion?()
-                return
-            }
-            downloadExpandedFiles(files, item: item, session: session) { succeeded in
-                if succeeded {
-                    item.status = .completed
-                    item.percentDone = 100
-                    ConnectionLog.shared.log(
-                        "Downloaded \(remoteItems.count) item\(remoteItems.count == 1 ? "" : "s") to \(localURL.path)",
-                        level: .success,
-                        session: session.name
-                    )
-                }
-                completion?()
-            }
-        }
-
-        for remoteItem in remoteItems {
-            let destination = localURL.appendingPathComponent(remoteItem.name)
-            if remoteItem.isDirectory {
-                expandRemoteDirectory(remotePath: remoteItem.remotePath, localRoot: destination) { result in
-                    switch result {
-                    case .failure(let message):
-                        failure = message.localizedDescription
-                    case .success(let expanded):
-                        directories.append(contentsOf: expanded.directories)
-                        files.append(contentsOf: expanded.files)
-                    }
-                    finishOne()
+                } else {
+                    self.cleanupPartialDownload(partialURL)
                 }
             } else {
-                files.append(RemoteDownloadEntry(remotePath: remoteItem.remotePath, localURL: destination))
-                finishOne()
+                self.cleanupPartialDownload(partialURL)
             }
+            completion?()
         }
-    }
-
-    private func expandRemoteDirectory(
-        remotePath: String,
-        localRoot: URL,
-        completion: @escaping @MainActor (Result<(directories: [URL], files: [RemoteDownloadEntry]), RemoteDownloadError>) -> Void
-    ) {
-        guard let session = self.session else {
-            completion(.failure(RemoteDownloadError(message: "No active SFTP session")))
-            return
-        }
-
-        let marker = "__SSHSTUDIO_FILES__"
-        let root = SSHSecurity.remoteShellPath(remotePath)
-        let command = "find \(root) -type d -print && printf '\\n\(marker)\\n' && find \(root) -type f -print"
-        runSSHWithStatus(session: session, command: command) { status, output in
-            guard status == 0, let output else {
-                completion(.failure(RemoteDownloadError(message: "Could not list remote folder")))
-                return
-            }
-            let parts = output.components(separatedBy: "\n\(marker)\n")
-            guard parts.count == 2 else {
-                completion(.failure(RemoteDownloadError(message: "Could not parse remote folder listing")))
-                return
-            }
-
-            let remoteRoot = remotePath.hasSuffix("/") ? String(remotePath.dropLast()) : remotePath
-            let directoryURLs = parts[0]
-                .split(separator: "\n")
-                .map(String.init)
-                .map { path in localRoot.appendingPathComponent(Self.relativeRemotePath(path, root: remoteRoot), isDirectory: true) }
-            let fileEntries = parts[1]
-                .split(separator: "\n")
-                .map(String.init)
-                .map { path in
-                    RemoteDownloadEntry(
-                        remotePath: path,
-                        localURL: localRoot.appendingPathComponent(Self.relativeRemotePath(path, root: remoteRoot))
-                    )
-                }
-
-            completion(.success((directoryURLs.isEmpty ? [localRoot] : directoryURLs, fileEntries)))
-        }
-    }
-
-    private static func relativeRemotePath(_ path: String, root: String) -> String {
-        var normalizedRoot = root.hasSuffix("/") ? String(root.dropLast()) : root
-        if normalizedRoot == "." || normalizedRoot == "~" {
-            normalizedRoot = ""
-        }
-        guard !normalizedRoot.isEmpty, path.hasPrefix(normalizedRoot) else {
-            return (path as NSString).lastPathComponent
-        }
-        var suffix = String(path.dropFirst(normalizedRoot.count))
-        if suffix.hasPrefix("/") {
-            suffix.removeFirst()
-        }
-        return suffix
-    }
-
-    private func createLocalDirectories(_ urls: [URL]) throws {
-        for url in Set(urls.map(\.path)).map(URL.init(fileURLWithPath:)) {
-            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        }
-    }
-
-    private func downloadExpandedFiles(_ files: [RemoteDownloadEntry], item: TransferItem,
-                                       session: Session,
-                                       completion: (@MainActor (Bool) -> Void)?) {
-        do {
-            for file in files {
-                try FileManager.default.createDirectory(
-                    at: file.localURL.deletingLastPathComponent(),
-                    withIntermediateDirectories: true
-                )
-            }
-        } catch {
-            item.status = .failed("Could not create local folder: \(error.localizedDescription)")
-            completion?(false)
-            return
-        }
-
-        let commands = files.map {
-            "get -a \(Self.sftpRemotePath($0.remotePath)) \(Self.sftpLocalPath($0.localURL.path))"
-        }
-        sftpTransfer(commands: commands, session: session, item: item, isDirectory: true, completion: completion)
     }
 
     private func invalidateCache(for path: String) {
@@ -907,12 +717,12 @@ class SFTPManager: ObservableObject {
 
         let itemName = remoteItems.count == 1 ? remoteItems[0].name : "\(remoteItems.count) items"
         let item = TransferItem(name: itemName, direction: .download)
-        item.profileLabel = "Fast SFTP batch"
+        item.profileLabel = "SFTP batch"
         TransferQueue.shared.add(item)
 
         let directories = remoteItems.filter(\.isDirectory)
         guard directories.isEmpty else {
-            expandAndDownloadRemoteItems(
+            downloadRemoteItemsWithSFTP(
                 remoteItems: remoteItems,
                 to: localURL,
                 session: session,
@@ -939,6 +749,107 @@ class SFTPManager: ObservableObject {
             }
             completion?()
         }
+    }
+
+    private func downloadRemoteItemsWithSFTP(
+        remoteItems: [(remotePath: String, name: String, isDirectory: Bool)],
+        to localURL: URL,
+        session: Session,
+        item: TransferItem,
+        completion: (@MainActor () -> Void)?
+    ) {
+        do {
+            try FileManager.default.createDirectory(at: localURL, withIntermediateDirectories: true)
+        } catch {
+            item.status = .failed(SFTPDownloadFailure.localDestinationUnavailable.message + ": \(error.localizedDescription)")
+            completion?()
+            return
+        }
+
+        var staged: [(partial: URL, final: URL, isDirectory: Bool)] = []
+        var commands: [String] = []
+        do {
+            for remoteItem in remoteItems {
+                let final = localURL.appendingPathComponent(remoteItem.name)
+                guard !FileManager.default.fileExists(atPath: final.path) else {
+                    item.status = .failed(SFTPDownloadFailure.localDestinationUnavailable.message + ": destination already exists")
+                    item.addDetailLine("Choose Replace, Merge, Keep Both, or Cancel before retrying.")
+                    completion?()
+                    return
+                }
+                let partial = Self.partialDownloadURL(for: final)
+                try? FileManager.default.removeItem(at: partial)
+                staged.append((partial, final, remoteItem.isDirectory))
+                if remoteItem.isDirectory {
+                    commands.append(try SFTPRecursiveDownloadBuilder.command(
+                        remotePath: remoteItem.remotePath,
+                        localPartialPath: partial.path
+                    ))
+                } else {
+                    commands.append("get -a \(Self.sftpRemotePath(remoteItem.remotePath)) \(Self.sftpLocalPath(partial.path))")
+                }
+            }
+        } catch {
+            item.status = .failed(SFTPDownloadFailure.remoteDirectoryNotFound.message)
+            staged.forEach { cleanupPartialDownload($0.partial) }
+            completion?()
+            return
+        }
+
+        item.profileLabel = "SFTP recursive batch"
+        sftpTransfer(commands: commands, session: session, item: item, isDirectory: remoteItems.contains(where: \.isDirectory)) { [weak self] succeeded in
+            guard let self else {
+                completion?()
+                return
+            }
+            guard succeeded else {
+                staged.forEach { self.cleanupPartialDownload($0.partial) }
+                completion?()
+                return
+            }
+            for entry in staged {
+                guard self.finalizeDirectoryDownload(partialURL: entry.partial, localURL: entry.final, item: item) else {
+                    staged.forEach { self.cleanupPartialDownload($0.partial) }
+                    completion?()
+                    return
+                }
+            }
+            item.status = .completed
+            item.percentDone = 100
+            ConnectionLog.shared.log(
+                "Downloaded \(remoteItems.count) item\(remoteItems.count == 1 ? "" : "s") to \(localURL.path)",
+                level: .success,
+                session: session.name
+            )
+            completion?()
+        }
+    }
+
+    private static func partialDownloadURL(for localURL: URL) -> URL {
+        localURL.deletingLastPathComponent()
+            .appendingPathComponent(".\(localURL.lastPathComponent).sshstudio-download.partial-\(UUID().uuidString)")
+    }
+
+    private func finalizeDirectoryDownload(partialURL: URL, localURL: URL, item: TransferItem) -> Bool {
+        do {
+            guard FileManager.default.fileExists(atPath: partialURL.path) else {
+                item.status = .failed(SFTPDownloadFailure.recursiveTransferUnsupported.message)
+                return false
+            }
+            if FileManager.default.fileExists(atPath: localURL.path) {
+                item.status = .failed(SFTPDownloadFailure.localDestinationUnavailable.message + ": destination already exists")
+                return false
+            }
+            try FileManager.default.moveItem(at: partialURL, to: localURL)
+            return true
+        } catch {
+            item.status = .failed(SFTPDownloadFailure.localDestinationUnavailable.message + ": \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    private func cleanupPartialDownload(_ partialURL: URL) {
+        try? FileManager.default.removeItem(at: partialURL)
     }
 
     func rename(file: RemoteFile, to newName: String, session: Session, completion: (@MainActor () -> Void)? = nil) {

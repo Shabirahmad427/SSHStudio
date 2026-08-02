@@ -350,4 +350,112 @@ struct Phase4SFTPTests {
 
         #expect(selection.selectedIDs == ["third"])
     }
+
+    @Test func recursiveDirectoryDownloadCommandUsesGetR() throws {
+        let command = try SFTPRecursiveDownloadBuilder.command(
+            remotePath: "/remote/pontos_xyz",
+            localPartialPath: "/tmp/.pontos_xyz.partial"
+        )
+
+        #expect(command == #"get -a -R "/remote/pontos_xyz" "/tmp/.pontos_xyz.partial""#)
+        #expect(command.contains("find ") == false)
+    }
+
+    @Test func recursiveDirectoryDownloadSupportsEmptyAndNestedDirectoriesByUsingServerRecursion() throws {
+        let empty = try SFTPRecursiveDownloadBuilder.command(
+            remotePath: "/remote/empty",
+            localPartialPath: "/tmp/.empty.partial"
+        )
+        let nested = try SFTPRecursiveDownloadBuilder.command(
+            remotePath: "/remote/a/b/c",
+            localPartialPath: "/tmp/.c.partial"
+        )
+
+        #expect(empty.contains("get -a -R"))
+        #expect(nested.contains(#""/remote/a/b/c""#))
+    }
+
+    @Test func recursiveDirectoryDownloadQuotesSpacesUnicodeQuotesAndLeadingDashes() throws {
+        let command = try SFTPRecursiveDownloadBuilder.command(
+            remotePath: #"/remote/Project Files/unicode-é/--leading "quote"/pontos_xyz"#,
+            localPartialPath: #"/tmp/.unicode-é "quote".partial"#
+        )
+
+        #expect(command == #"get -a -R "/remote/Project Files/unicode-é/--leading \"quote\"/pontos_xyz" "/tmp/.unicode-é \"quote\".partial""#)
+    }
+
+    @Test func recursiveDirectoryDownloadRejectsInvalidRemotePaths() {
+        #expect(throws: SFTPError.invalidRemotePath) {
+            try SFTPRecursiveDownloadBuilder.command(
+                remotePath: "/remote/bad\npath",
+                localPartialPath: "/tmp/partial"
+            )
+        }
+    }
+
+    @Test func typedDownloadErrorsClassifyPermissionConnectionAuthAndUnsupportedRecursiveTransfer() {
+        #expect(SFTPDownloadDiagnostics.classify("Permission denied") == .permissionDenied)
+        #expect(SFTPDownloadDiagnostics.classify("No such file or directory") == .remoteDirectoryNotFound)
+        #expect(SFTPDownloadDiagnostics.classify("Connection closed") == .connectionClosed)
+        #expect(SFTPDownloadDiagnostics.classify("Authentication failed") == .authenticationFailed)
+        #expect(SFTPDownloadDiagnostics.classify("Invalid flag -R") == .recursiveTransferUnsupported)
+    }
+
+    @Test func localConflictActionsCoverReplaceMergeKeepBothAndCancel() {
+        let keepBothURL = URL(fileURLWithPath: "/tmp/pontos_xyz copy")
+        let actions: [SFTPLocalConflictAction] = [
+            .replace,
+            .merge,
+            .keepBoth(keepBothURL),
+            .cancel
+        ]
+
+        #expect(actions.count == 4)
+        #expect(actions.contains(.keepBoth(keepBothURL)))
+    }
+
+    @Test func symlinkPolicyDoesNotAddFollowSymlinkFlagsByDefault() throws {
+        let command = try SFTPRecursiveDownloadBuilder.command(
+            remotePath: "/remote/tree",
+            localPartialPath: "/tmp/.tree.partial"
+        )
+
+        #expect(!command.contains(" -L "))
+        #expect(!command.contains("--copy-links"))
+    }
+
+    @Test func proxyJumpSFTPInvocationStillUsesSSHConfigAlias() throws {
+        let session = Session(
+            name: "Proxy Fixture",
+            host: "ignored.example",
+            username: "fixture",
+            authentication: .sshConfigManaged,
+            sshConfigAlias: "docinho"
+        )
+
+        let invocation = try SFTPInvocationBuilder.invocation(for: session)
+
+        #expect(invocation.arguments.contains("fixture@docinho"))
+        #expect(invocation.arguments.contains("-P"))
+    }
+
+    @Test func fallbackSFTPModeUsesBatchFileAndNoShellFindForDirectoryDownload() throws {
+        let batch = URL(fileURLWithPath: "/tmp/sshstudio batch")
+        let session = Session(
+            name: "Fallback Fixture",
+            host: "example.com",
+            username: "fixture",
+            authentication: .sshConfigManaged
+        )
+
+        let invocation = try SSHCommandBuilder.sftpInvocation(for: session, batchURL: batch)
+        let command = try SFTPRecursiveDownloadBuilder.command(
+            remotePath: "/remote/pontos_xyz",
+            localPartialPath: "/tmp/.pontos_xyz.partial"
+        )
+
+        #expect(invocation.arguments.contains("-b"))
+        #expect(command.contains("find ") == false)
+        #expect(command.contains("get -a -R"))
+    }
 }
