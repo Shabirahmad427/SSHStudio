@@ -26,11 +26,11 @@ enum SFTPDirectoryParser {
         guard parts.count >= 9 else { return nil }
         let permissions = String(parts[0])
         guard isFileMode(permissions),
-              Int(parts[1]) != nil
+              isLinkCount(parts[1])
         else { return nil }
         let size = Int64(parts[4])
         let modified = "\(parts[5]) \(parts[6]) \(parts[7])"
-        let name = parts.dropFirst(8).joined(separator: " ")
+        let name = normalizedName(parts.dropFirst(8).joined(separator: " "))
         guard name != "." && name != ".." else { return nil }
         return SFTPDirectoryEntry(
             permissions: permissions,
@@ -40,6 +40,14 @@ enum SFTPDirectoryParser {
             modified: modified,
             modifiedDate: parseModifiedDate(modified)
         )
+    }
+
+    private static func isLinkCount<S: StringProtocol>(_ value: S) -> Bool {
+        value == "?" || Int(value) != nil
+    }
+
+    private static func normalizedName(_ value: String) -> String {
+        value.hasPrefix("./") ? String(value.dropFirst(2)) : value
     }
 
     private static func isFileMode(_ value: String) -> Bool {

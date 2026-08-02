@@ -150,6 +150,21 @@ struct Phase4SFTPTests {
         #expect(entries[2].name == "report 'draft'.txt")
     }
 
+    @Test func directoryParserHandlesDocinhoMediaListingWithUnknownLinkCounts() throws {
+        let output = """
+        Remote working directory: /media/shabir
+        drwxr-x---    ? root     root         4096 Jul 23 15:15 ./.
+        drwxr-xr-x    ? root     root         4096 Feb 20  2025 ./..
+        drwxr-xr-x    ? shabir   shabir       4096 Aug  2 12:41 ./Coaraci
+        drwxr-xr-x    ? shabir   shabir     262144 Aug  2 12:42 ./Expansion
+        """
+
+        let entries = try SFTPDirectoryParser.parseListing(output)
+
+        #expect(entries.map(\.name) == ["Coaraci", "Expansion"])
+        #expect(entries.map(\.isDirectory) == [true, true])
+    }
+
     @Test func sftpInvocationBuilderUsesSharedSecurityPolicy() throws {
         let session = Session(
             name: "Fixture",
