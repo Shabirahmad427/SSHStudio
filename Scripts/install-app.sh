@@ -100,6 +100,7 @@ verify_existing_app() {
 
 signature_failure_for_app() {
   local app="$1"
+  codesign --verify --deep --strict --verbose=4 "$app" >/dev/null 2>&1 && return 0
   codesign --verify --deep --strict --verbose=4 "$app" 2>&1 >/dev/null || true
 }
 
