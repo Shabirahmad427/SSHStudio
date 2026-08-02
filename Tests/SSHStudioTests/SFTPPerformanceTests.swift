@@ -155,6 +155,27 @@ struct SFTPPerformanceTests {
         #expect(!SFTPSessionError.securityPolicyFailed("invalid").allowsCompatibilityFallback)
     }
 
+    @Test func isolatedFallbackInvocationDisablesMultiplexing() {
+        let arguments = [
+            "-b", "/tmp/batch",
+            "-o", "BatchMode=yes",
+            "-o", "ControlMaster=auto",
+            "-o", "ControlPath=/tmp/socket",
+            "-o", "ControlPersist=10m",
+            "alias"
+        ]
+
+        let isolated = SFTPManager.isolatedOneOffSFTPArguments(from: arguments)
+
+        #expect(isolated.contains("ControlMaster=no"))
+        #expect(isolated.contains("ControlPersist=no"))
+        #expect(isolated.contains("ControlPath=none"))
+        #expect(!isolated.contains("ControlMaster=auto"))
+        #expect(!isolated.contains("ControlPath=/tmp/socket"))
+        #expect(!isolated.contains("ControlPersist=10m"))
+        #expect(isolated.first == "-b")
+    }
+
     private static func fixtureListing(count: Int) -> String {
         (0..<count).map { index in
             let name = index.isMultiple(of: 10)

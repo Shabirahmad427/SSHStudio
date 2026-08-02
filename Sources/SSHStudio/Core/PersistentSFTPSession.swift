@@ -369,6 +369,22 @@ final class PersistentSFTPSession: @unchecked Sendable {
         queue.sync { _tearDown() }
     }
 
+    func disconnectAndWait(timeout: TimeInterval = 3) {
+        let processToWait: Process? = queue.sync {
+            let processToWait = process
+            _tearDown()
+            return processToWait
+        }
+        guard let processToWait else { return }
+        let deadline = Date().addingTimeInterval(timeout)
+        while processToWait.isRunning, Date() < deadline {
+            usleep(20_000)
+        }
+        if processToWait.isRunning {
+            processToWait.terminate()
+        }
+    }
+
     private func _tearDown() {
         let queued = commandQueue
         commandQueue.removeAll()

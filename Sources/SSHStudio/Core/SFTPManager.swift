@@ -210,8 +210,9 @@ class SFTPManager: ObservableObject {
                 listingStatus = ""
             }
         } catch let error as SFTPSessionError where error.allowsCompatibilityFallback {
-            persistentSFTP?.disconnect()
+            persistentSFTP?.disconnectAndWait()
             persistentSFTP = nil
+            cleanupPersistentControlSocket(for: session)
             persistentCapability.markCompatibilityUnavailable(profileID: session.id)
             diagnosticStatus = .compatibilityFallbackActive
             await loadListingWithOneOffFallback(
@@ -303,7 +304,7 @@ class SFTPManager: ObservableObject {
             do {
                 let invocation = try SSHCommandBuilder.sftpInvocation(for: session, batchURL: batchURL)
                 process.executableURL = invocation.executableURL
-                process.arguments = Self.disableControlMaster(in: invocation.arguments)
+                process.arguments = Self.isolatedOneOffSFTPArguments(from: invocation.arguments)
             } catch {
                 try? FileManager.default.removeItem(at: batchURL)
                 continuation.resume(returning: (255, DiagnosticRedactor.redact(error.localizedDescription)))
@@ -342,9 +343,43 @@ class SFTPManager: ObservableObject {
         }
     }
 
-    nonisolated private static func disableControlMaster(in arguments: [String]) -> [String] {
+    private func cleanupPersistentControlSocket(for session: Session) {
+        let sockPath = SSHSecurity.controlPath(for: session)
+        guard FileManager.default.fileExists(atPath: sockPath) else { return }
+        let check = Process()
+        check.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+        check.arguments = [
+            "-O", "check",
+            "-o", "ControlMaster=no",
+            "-o", "BatchMode=yes",
+            "-o", "ControlPath=\(sockPath)",
+            SSHSecurity.connectionTarget(for: session)
+        ]
+        check.standardOutput = FileHandle.nullDevice
+        check.standardError = FileHandle.nullDevice
+        do {
+            try check.run()
+            check.waitUntilExit()
+            if check.terminationStatus != 0 {
+                try? FileManager.default.removeItem(atPath: sockPath)
+            }
+        } catch {
+            try? FileManager.default.removeItem(atPath: sockPath)
+        }
+    }
+
+    nonisolated static func isolatedOneOffSFTPArguments(from arguments: [String]) -> [String] {
         arguments.map { arg in
-            arg == "ControlMaster=auto" ? "ControlMaster=no" : arg
+            switch arg {
+            case "ControlMaster=auto", "ControlMaster=yes":
+                return "ControlMaster=no"
+            case let value where value.hasPrefix("ControlPersist="):
+                return "ControlPersist=no"
+            case let value where value.hasPrefix("ControlPath="):
+                return "ControlPath=none"
+            default:
+                return arg
+            }
         }
     }
 
