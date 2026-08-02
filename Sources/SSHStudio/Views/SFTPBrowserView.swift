@@ -890,7 +890,7 @@ struct RemotePaneView: View {
                 onBack: { sftp.goBack() },
                 onForward: { sftp.goForward() },
                 onNavigatePath: { sftp.listFiles(at: $0) },
-                onRefresh: { sftp.listFiles(at: sftp.currentPath, pushHistory: false) },
+                onRefresh: { sftp.listFiles(at: sftp.currentPath, pushHistory: false, forceRefresh: true) },
                 onHome: { sftp.goHome(for: session) },
                 onNewFolder: { showNewFolder = true },
                 onNewFile: { showNewFile = true }
@@ -1015,6 +1015,21 @@ struct RemotePaneView: View {
                     .frame(height: 2)
                     .padding(.horizontal, 0)
             }
+            if sftp.isShowingCachedListing || !sftp.listingStatus.isEmpty {
+                HStack(spacing: 6) {
+                    if sftp.listingStatus == "Refreshing" || sftp.listingStatus == "Loading" {
+                        ProgressView()
+                            .controlSize(.mini)
+                    }
+                    Text(sftp.isShowingCachedListing ? "Cached contents" : sftp.listingStatus)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 2)
+                .background(.ultraThinMaterial)
+            }
 
             remoteContent
         }
@@ -1070,7 +1085,7 @@ struct RemotePaneView: View {
                     Text(sftp.error ?? "Unknown error")
                         .foregroundColor(.secondary)
                         .multilineTextAlignment(.center)
-                    Button("Retry") { sftp.listFiles(at: sftp.currentPath) }
+                    Button("Retry") { sftp.listFiles(at: sftp.currentPath, forceRefresh: true) }
                     Spacer()
                 }
                 .padding()
@@ -1156,7 +1171,7 @@ struct RemoteFileList: View {
     let onDropExit: () -> Void
 
     @State private var openingFile: String?
-    @State private var selectedFiles: Set<UUID> = []
+    @State private var selectedFiles: Set<String> = []
     @State private var renameTarget: RemoteFile?
     @State private var renameText = ""
     @State private var deleteTarget: RemoteFile?
@@ -1321,7 +1336,7 @@ struct RemoteFileList: View {
             }
         }
         Divider()
-        Button { sftp.listFiles(at: sftp.currentPath, pushHistory: false) } label: {
+        Button { sftp.listFiles(at: sftp.currentPath, pushHistory: false, forceRefresh: true) } label: {
             Label("Refresh", systemImage: "arrow.clockwise")
         }
     }

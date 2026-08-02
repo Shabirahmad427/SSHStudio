@@ -1,13 +1,31 @@
 import Foundation
 
-struct RemoteFile: Identifiable {
-    let id = UUID()
+struct RemoteFile: Identifiable, Equatable, Sendable {
+    let id: String
     let name: String
     let isDirectory: Bool
     let size: String
     let permissions: String
     let modified: String
     let modifiedDate: Date?
+
+    init(
+        id: String? = nil,
+        name: String,
+        isDirectory: Bool,
+        size: String,
+        permissions: String,
+        modified: String,
+        modifiedDate: Date?
+    ) {
+        self.name = name
+        self.isDirectory = isDirectory
+        self.size = size
+        self.permissions = permissions
+        self.modified = modified
+        self.modifiedDate = modifiedDate
+        self.id = id ?? "\(isDirectory ? "d" : "f")|\(name)|\(size)|\(permissions)|\(modified)"
+    }
 }
 
 @MainActor
@@ -17,13 +35,19 @@ class SFTPManager: ObservableObject {
     @Published var isLoading = false
     @Published var error: String?
     @Published var showHiddenFiles = false
+    @Published var isShowingCachedListing = false
+    @Published var listingStatus: String = ""
 
     let fileSync = TempFileSync()
     let history = NavigationHistory<String>(initial: "~")
     private var session: Session?
     private var hasConnected = false
-    private var dirCache: [String: [RemoteFile]] = [:]
+    private var dirCache = SFTPDirectoryCache()
     private var persistentSFTP: PersistentSFTPSession?
+    private var activeListingTask: Task<Void, Never>?
+    private var activeListingRequestID: UInt64 = 0
+    private var inFlightListingKeys: Set<SFTPListingCacheKey> = []
+    private var refreshTask: Task<Void, Never>?
     nonisolated static let sftpBufferSize = "65536"
     nonisolated static let sftpRequestCount = "256"
 
@@ -56,6 +80,9 @@ class SFTPManager: ObservableObject {
         // Tear down the old persistent session whenever the target server changes.
         persistentSFTP?.disconnect()
         persistentSFTP = nil
+        activeListingTask?.cancel()
+        activeListingTask = nil
+        dirCache.removeAll()
         self.session = session
         hasConnected = true
         currentPath = startPath
@@ -84,38 +111,118 @@ class SFTPManager: ObservableObject {
         return sftp
     }
 
-    func listFiles(at path: String, pushHistory: Bool = true) {
+    func listFiles(at path: String, pushHistory: Bool = true, forceRefresh: Bool = false) {
         guard let session else { return }
         error = nil
+        let normalizedPath = Self.normalizedRemotePath(path)
+        let cacheKey = SFTPListingCacheKey(
+            profileID: session.id,
+            normalizedPath: normalizedPath,
+            options: SFTPListingOptions(showHiddenFiles: showHiddenFiles)
+        )
 
-        // Serve from cache immediately so the UI updates without waiting for SSH
-        let cacheKey = path == "." ? "~" : path
-        if let cached = dirCache[cacheKey] {
-            files = cached
-            if path != "." {
-                if pushHistory { history.navigate(to: path) }
-                currentPath = path
+        if inFlightListingKeys.contains(cacheKey), !forceRefresh {
+            if dirCache.value(for: cacheKey) == nil {
+                isLoading = true
+                listingStatus = "Loading"
             }
-        } else {
-            isLoading = true
+            return
         }
 
-        let lsFlag = showHiddenFiles ? "-la" : "-lA"
-        let cmd = "ls \(lsFlag) -- \(SSHSecurity.remoteShellPath(path)) 2>&1"
-        runSSHWithStatus(session: session, command: cmd) { [weak self] status, output in
-            self?.isLoading = false
-            if status == 0, let output {
-                let parsed = Self.parse(lsOutput: output)
-                self?.dirCache[cacheKey] = parsed
-                self?.files = parsed
-                if path != "." {
-                    if pushHistory { self?.history.navigate(to: path) }
-                    self?.currentPath = path
-                }
-            } else {
-                let detail = output?.trimmingCharacters(in: .whitespacesAndNewlines)
-                self?.error = detail?.isEmpty == false ? detail : "Failed to list files"
+        let requestID = activeListingRequestID + 1
+        activeListingRequestID = requestID
+
+        if let cached = dirCache.value(for: cacheKey) {
+            applyListing(cached.files, path: normalizedPath, pushHistory: pushHistory, requestID: requestID, cached: true)
+            if cached.isFresh, !forceRefresh {
+                listingStatus = "Cached"
+                return
             }
+            isShowingCachedListing = true
+            listingStatus = "Refreshing"
+        } else {
+            isLoading = true
+            isShowingCachedListing = false
+            listingStatus = "Loading"
+        }
+
+        activeListingTask?.cancel()
+        activeListingTask = Task { [weak self] in
+            guard let self else { return }
+            await self.loadListing(
+                session: session,
+                path: normalizedPath,
+                cacheKey: cacheKey,
+                requestID: requestID,
+                pushHistory: pushHistory
+            )
+        }
+    }
+
+    private func loadListing(
+        session: Session,
+        path: String,
+        cacheKey: SFTPListingCacheKey,
+        requestID: UInt64,
+        pushHistory: Bool
+    ) async {
+        inFlightListingKeys.insert(cacheKey)
+        defer { inFlightListingKeys.remove(cacheKey) }
+
+        let listStart = ContinuousClock.now
+        do {
+            let sftp = try await getPersistentSFTP(for: session)
+            let lsFlag = showHiddenFiles ? "-la" : "-lA"
+            let output = try await sftp.run("ls \(lsFlag) \(Self.sftpRemotePath(path))")
+            try Task.checkCancellation()
+            let parseStart = ContinuousClock.now
+            let parsed = await Task.detached(priority: .userInitiated) {
+                Self.parse(lsOutput: output)
+            }.value
+            await SFTPPerformanceRecorder.shared.record(.parsing, start: parseStart, entryCount: parsed.count, requestID: requestID)
+            try Task.checkCancellation()
+
+            guard requestID == activeListingRequestID else { return }
+            let wasFirstListing = files.isEmpty
+            dirCache.set(parsed, for: cacheKey)
+            applyListing(parsed, path: path, pushHistory: pushHistory, requestID: requestID, cached: false)
+            let phase: SFTPPerformancePhase = wasFirstListing ? .firstDirectoryListing : .subsequentDirectoryListing
+            await SFTPPerformanceRecorder.shared.record(phase, start: listStart, entryCount: parsed.count, requestID: requestID, cacheState: "network")
+        } catch is CancellationError {
+            if requestID == activeListingRequestID {
+                isLoading = false
+                listingStatus = ""
+            }
+        } catch {
+            if requestID == activeListingRequestID {
+                persistentSFTP?.disconnect()
+                persistentSFTP = nil
+                isLoading = false
+                isShowingCachedListing = false
+                listingStatus = ""
+                let message = DiagnosticRedactor.redact(error.localizedDescription)
+                self.error = message.isEmpty ? "Failed to list files" : message
+            }
+        }
+    }
+
+    private func applyListing(
+        _ newFiles: [RemoteFile],
+        path: String,
+        pushHistory: Bool,
+        requestID: UInt64,
+        cached: Bool
+    ) {
+        guard requestID == activeListingRequestID else { return }
+        let start = ContinuousClock.now
+        files = newFiles
+        if pushHistory { history.navigate(to: path) }
+        currentPath = path
+        isLoading = false
+        isShowingCachedListing = cached
+        listingStatus = cached ? "Cached" : ""
+        Task {
+            await SFTPPerformanceRecorder.shared.record(.mainActorUpdate, start: start, entryCount: newFiles.count, requestID: requestID, cacheState: cached ? "cache" : "network")
         }
     }
 
@@ -486,14 +593,26 @@ class SFTPManager: ObservableObject {
     }
 
     private func invalidateCache(for path: String) {
-        let key = path == "." ? "~" : path
-        dirCache.removeValue(forKey: key)
+        guard let profileID = session?.id else { return }
+        dirCache.invalidate(profileID: profileID, path: Self.normalizedRemotePath(path))
+    }
+
+    private func scheduleRefreshAfterMutation(path: String) {
+        invalidateCache(for: path)
+        refreshTask?.cancel()
+        refreshTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(180))
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                self?.listFiles(at: self?.currentPath ?? path, pushHistory: false, forceRefresh: true)
+            }
+        }
     }
 
     func toggleHiddenFiles() {
         showHiddenFiles.toggle()
         dirCache.removeAll()
-        listFiles(at: currentPath, pushHistory: false)
+        listFiles(at: currentPath, pushHistory: false, forceRefresh: true)
     }
 
     func copyFile(_ file: RemoteFile, to newName: String, completion: (@MainActor () -> Void)? = nil) {
@@ -502,8 +621,7 @@ class SFTPManager: ObservableObject {
         let dstPath = Self.childPath(parent: currentPath, child: newName)
         let flag = file.isDirectory ? "-r " : ""
         runSSH(session: session, command: "cp \(flag)-- \(SSHSecurity.remoteShellPath(srcPath)) \(SSHSecurity.remoteShellPath(dstPath))") { [weak self] _ in
-            self?.invalidateCache(for: self?.currentPath ?? ".")
-            self?.listFiles(at: self?.currentPath ?? ".", pushHistory: false)
+            self?.scheduleRefreshAfterMutation(path: self?.currentPath ?? ".")
             completion?()
         }
     }
@@ -601,8 +719,7 @@ class SFTPManager: ObservableObject {
             self?.deleteProgress = ""
             if output?.contains(marker) == true {
                 self?.error = nil
-                self?.invalidateCache(for: self?.currentPath ?? ".")
-                self?.listFiles(at: self?.currentPath ?? ".", pushHistory: false)
+                self?.scheduleRefreshAfterMutation(path: self?.currentPath ?? ".")
                 completion?()
             } else {
                 let detail = output?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -614,17 +731,15 @@ class SFTPManager: ObservableObject {
     func newFolder(named name: String, session: Session, completion: (@MainActor () -> Void)? = nil) {
         guard let session = self.session else { return }
         runSSH(session: session, command: "mkdir -p -- \(SSHSecurity.remoteShellPath(Self.childPath(parent: currentPath, child: name)))") { [weak self] _ in
-            self?.invalidateCache(for: self?.currentPath ?? ".")
-            self?.listFiles(at: self?.currentPath ?? ".", pushHistory: false)
-            completion?()
+                self?.scheduleRefreshAfterMutation(path: self?.currentPath ?? ".")
+                completion?()
         }
     }
 
     func newFile(named name: String, session: Session, completion: (@MainActor () -> Void)? = nil) {
         guard let session = self.session else { return }
         runSSH(session: session, command: "touch -- \(SSHSecurity.remoteShellPath(Self.childPath(parent: currentPath, child: name)))") { [weak self] _ in
-            self?.invalidateCache(for: self?.currentPath ?? ".")
-            self?.listFiles(at: self?.currentPath ?? ".", pushHistory: false)
+            self?.scheduleRefreshAfterMutation(path: self?.currentPath ?? ".")
             completion?()
         }
     }
@@ -636,8 +751,7 @@ class SFTPManager: ObservableObject {
             return
         }
         runSSH(session: session, command: "chmod \(mode) -- \(SSHSecurity.remoteShellPath(Self.childPath(parent: currentPath, child: file.name)))") { [weak self] _ in
-            self?.invalidateCache(for: self?.currentPath ?? ".")
-            self?.listFiles(at: self?.currentPath ?? ".", pushHistory: false)
+            self?.scheduleRefreshAfterMutation(path: self?.currentPath ?? ".")
             completion?()
         }
     }
@@ -748,8 +862,7 @@ class SFTPManager: ObservableObject {
                     return
                 }
                 if succeeded {
-                    self.invalidateCache(for: self.currentPath)
-                    self.listFiles(at: self.currentPath, pushHistory: false)
+                    self.scheduleRefreshAfterMutation(path: self.currentPath)
                     ConnectionLog.shared.log(
                         "Uploaded folder \(localURL.lastPathComponent) to \(remoteRootPath)\(Self.transferSizeSuffix(for: item))",
                         level: .success,
@@ -1541,6 +1654,9 @@ class SFTPManager: ObservableObject {
             case .success:
                 do {
                     try process.run()
+                    Task {
+                        await SFTPPerformanceRecorder.shared.recordProcessLaunch()
+                    }
                     reader.start { data in
                         for line in output.consume(data) {
                             Task { @MainActor in
@@ -1637,6 +1753,9 @@ class SFTPManager: ObservableObject {
             case .success:
                 do {
                     try process.run()
+                    Task {
+                        await SFTPPerformanceRecorder.shared.recordProcessLaunch()
+                    }
                     reader.start { data in
                         for line in output.consume(data) {
                             Task { @MainActor in
@@ -1669,11 +1788,12 @@ class SFTPManager: ObservableObject {
            pct >= 0, pct <= 100,
            parts[1].hasSuffix("%") {
             let bytes = Int64(parts[0].replacingOccurrences(of: ",", with: "")) ?? item.bytesTransferred
-            item.bytesTransferred = bytes
-            item.percentDone      = pct
-            item.speedBytesPerSec = parseSpeed(parts[2])
-            item.eta              = parts[3]
-            if pct > 0 { item.totalBytes = Int64(Double(bytes) / (pct / 100.0)) }
+            item.applyProgress(
+                bytesTransferred: bytes,
+                percentDone: pct,
+                speedBytesPerSec: parseSpeed(parts[2]),
+                eta: parts[3]
+            )
             return
         }
         // "Total transferred file size: 1,234,567 bytes"
@@ -1887,6 +2007,16 @@ class SFTPManager: ObservableObject {
         return batches
     }
 
+    nonisolated private static func normalizedRemotePath(_ path: String) -> String {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != "." else { return "~" }
+        do {
+            return try SFTPPath(trimmed).rawValue
+        } catch {
+            return trimmed.replacingOccurrences(of: #"//+"#, with: "/", options: .regularExpression)
+        }
+    }
+
     private static func transferProfile(for name: String, isDirectory: Bool) -> (label: String, rsyncArgs: [String]) {
         let extensionName = (name as NSString).pathExtension.lowercased()
         let bulkExtensions: Set<String> = [
@@ -1942,6 +2072,9 @@ class SFTPManager: ObservableObject {
             case .success:
                 do {
                     try process.run()
+                    Task {
+                        await SFTPPerformanceRecorder.shared.recordProcessLaunch()
+                    }
                     reader.start()
                 } catch {
                     completion(255, nil)
@@ -1952,45 +2085,17 @@ class SFTPManager: ObservableObject {
         }
     }
 
-    private static func parse(lsOutput: String) -> [RemoteFile] {
-        let lines = lsOutput.components(separatedBy: "\n").filter { !$0.isEmpty }
-        return lines.compactMap { line -> RemoteFile? in
-            let parts = line.split(separator: " ", maxSplits: 8, omittingEmptySubsequences: true)
-            guard parts.count >= 9 else { return nil }
-            let perms = String(parts[0])
-            guard isFileMode(perms),
-                  Int(parts[1]) != nil,
-                  Int64(parts[4]) != nil
-            else { return nil }
-            let size = String(parts[4])
-            let modified = "\(parts[5]) \(parts[6]) \(parts[7])"
-            let name = String(parts[8])
-            guard name != "." && name != ".." else { return nil }
+    nonisolated private static func parse(lsOutput: String) -> [RemoteFile] {
+        (try? SFTPDirectoryParser.parseListing(lsOutput).map { entry in
             return RemoteFile(
-                name: name,
-                isDirectory: perms.hasPrefix("d"),
-                size: size,
-                permissions: perms,
-                modified: modified,
-                modifiedDate: parseModifiedDate(modified)
+                name: entry.name,
+                isDirectory: entry.isDirectory,
+                size: entry.size.map(String.init) ?? "",
+                permissions: entry.permissions,
+                modified: entry.modified,
+                modifiedDate: entry.modifiedDate
             )
-        }
-    }
-
-    private static func isFileMode(_ value: String) -> Bool {
-        value.range(
-            of: "^[bcdlps-][rwxStTs-]{9}[+@.]?$",
-            options: .regularExpression
-        ) != nil
-    }
-
-    private static func parseModifiedDate(_ value: String) -> Date? {
-        let includesTime = value.contains(":")
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = includesTime ? "MMM d HH:mm yyyy" : "MMM d yyyy"
-        let normalized = includesTime ? "\(value) \(Calendar.current.component(.year, from: Date()))" : value
-        return formatter.date(from: normalized)
+        }) ?? []
     }
 }
 

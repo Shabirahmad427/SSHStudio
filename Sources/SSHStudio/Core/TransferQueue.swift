@@ -35,6 +35,7 @@ class TransferItem: Identifiable, ObservableObject, @unchecked Sendable {
     private var runningProcess: Process?
     private var isCancellationRequested = false
     private var isSkipRequested = false
+    private var lastProgressUpdate = Date.distantPast
 
     var progress: Double { percentDone / 100.0 }
     var isTerminal: Bool {
@@ -132,6 +133,25 @@ class TransferItem: Identifiable, ObservableObject, @unchecked Sendable {
 
     func clearProcess() {
         runningProcess = nil
+    }
+
+    func applyProgress(
+        bytesTransferred: Int64,
+        percentDone: Double,
+        speedBytesPerSec: Double,
+        eta: String,
+        minimumInterval: TimeInterval = 0.2,
+        now: Date = Date()
+    ) {
+        guard now.timeIntervalSince(lastProgressUpdate) >= minimumInterval || percentDone >= 100 else { return }
+        lastProgressUpdate = now
+        self.bytesTransferred = bytesTransferred
+        self.percentDone = percentDone
+        self.speedBytesPerSec = speedBytesPerSec
+        self.eta = eta
+        if percentDone > 0 {
+            totalBytes = Int64(Double(bytesTransferred) / (percentDone / 100.0))
+        }
     }
 }
 

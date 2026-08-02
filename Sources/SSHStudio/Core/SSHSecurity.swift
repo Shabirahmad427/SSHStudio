@@ -26,16 +26,51 @@ enum SSHSecurity {
 
     static func controlPath(for session: Session) -> String {
         let identity = [
+            session.id.uuidString,
             session.sshConfigAlias,
             session.username,
             session.host,
-            "\(session.port)"
+            "\(session.port)",
+            "\(session.authentication.kind)",
+            session.privateKeyPath,
+            session.credentialReferenceID
         ].joined(separator: "\u{0}")
         let digest = SHA256.hash(data: Data(identity.utf8))
             .prefix(16)
             .map { String(format: "%02x", $0) }
             .joined()
-        return "\(NSHomeDirectory())/.ssh/ssh-studio-\(digest).sock"
+        let directory = controlSocketDirectory()
+        return directory.appendingPathComponent("ssh-studio-\(digest).sock").path
+    }
+
+    static func controlSocketDirectory() -> URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support")
+        let directory = base.appendingPathComponent("SSH Studio/ControlSockets", isDirectory: true)
+        if secureDirectory(directory) {
+            return directory
+        }
+        let runtime = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("ssh-studio-\(NSUserName())/ControlSockets", isDirectory: true)
+        _ = secureDirectory(runtime)
+        return runtime
+    }
+
+    @discardableResult
+    private static func secureDirectory(_ directory: URL) -> Bool {
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: directory.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+                return false
+            }
+            let attributes = try FileManager.default.attributesOfItem(atPath: directory.path)
+            let permissions = (attributes[.posixPermissions] as? NSNumber)?.intValue ?? 0
+            return permissions & 0o077 == 0
+        } catch {
+            return false
+        }
     }
 
     static func shellQuote(_ value: String) -> String {

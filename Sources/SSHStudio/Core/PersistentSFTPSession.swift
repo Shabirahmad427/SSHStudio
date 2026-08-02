@@ -30,9 +30,13 @@ final class PersistentSFTPSession: @unchecked Sendable {
     private var process: Process?
     private var masterHandle: FileHandle?
     private var outputBuffer = ""
+    private var isConnecting = false
+    private let maxQueuedCommands: Int
+    private let idleTimeout: TimeInterval
+    private var idleTimer: DispatchSourceTimer?
 
     private enum Pending {
-        case connecting(cont: CheckedContinuation<Void, Error>)
+        case connecting(conts: [CheckedContinuation<Void, Error>])
         case command(marker: String, cont: CheckedContinuation<String, Error>)
     }
     private struct QueuedCommand {
@@ -45,8 +49,10 @@ final class PersistentSFTPSession: @unchecked Sendable {
 
     var isAlive: Bool { process?.isRunning ?? false }
 
-    init(session: Session) {
+    init(session: Session, maxQueuedCommands: Int = 64, idleTimeout: TimeInterval = 600) {
         self.sshSession = session
+        self.maxQueuedCommands = maxQueuedCommands
+        self.idleTimeout = idleTimeout
     }
 
     deinit { _tearDown() }
@@ -68,6 +74,11 @@ final class PersistentSFTPSession: @unchecked Sendable {
             cont.resume()
             return
         }
+        if case .connecting(let conts) = pending {
+            pending = .connecting(conts: conts + [cont])
+            return
+        }
+        isConnecting = true
 
         // ── Remove stale control socket ───────────────────────────────────────
         // If a previous master died without cleaning up its socket file, ssh will
@@ -128,6 +139,9 @@ final class PersistentSFTPSession: @unchecked Sendable {
 
         do {
             try p.run()
+            Task {
+                await SFTPPerformanceRecorder.shared.recordProcessLaunch()
+            }
             reader.start { [weak self] data in
                 guard !data.isEmpty, let self else { return }
                 let text = String(data: data, encoding: .utf8) ?? ""
@@ -147,7 +161,7 @@ final class PersistentSFTPSession: @unchecked Sendable {
         masterHandle = mHandle
 
         // sftp will print "sftp> " once it is connected and ready.
-        pending = .connecting(cont: cont)
+        pending = .connecting(conts: [cont])
     }
 
     // MARK: - Execute
@@ -172,6 +186,10 @@ final class PersistentSFTPSession: @unchecked Sendable {
                 }
                 let queued = QueuedCommand(input: input, marker: marker, cont: cont)
                 if self.pending != nil {
+                    guard self.commandQueue.count < self.maxQueuedCommands else {
+                        cont.resume(throwing: SFTPSessionError.connectionFailed("SFTP operation queue is full"))
+                        return
+                    }
                     self.commandQueue.append(queued)
                 } else {
                     self._start(queued)
@@ -186,12 +204,14 @@ final class PersistentSFTPSession: @unchecked Sendable {
         outputBuffer += text
         switch pending {
 
-        case .connecting(let cont):
+        case .connecting(let conts):
             // sftp prints "sftp> " once the connection is established and it is ready.
             guard outputBuffer.contains("sftp> ") else { return }
             outputBuffer = ""
             pending = nil
-            cont.resume()
+            isConnecting = false
+            conts.forEach { $0.resume() }
+            _scheduleIdleTimeout()
 
         case .command(let marker, let cont):
             // We wait until:
@@ -206,6 +226,9 @@ final class PersistentSFTPSession: @unchecked Sendable {
             pending = nil
             cont.resume(returning: output)
             _startNextCommandIfNeeded()
+            if pending == nil {
+                _scheduleIdleTimeout()
+            }
 
         case nil:
             break
@@ -214,10 +237,11 @@ final class PersistentSFTPSession: @unchecked Sendable {
 
     private func _onProcessExit() {
         process = nil
+        isConnecting = false
         switch pending {
-        case .connecting(let c):
+        case .connecting(let conts):
             pending = nil
-            c.resume(throwing: SFTPSessionError.connectionFailed("sftp exited during connect"))
+            conts.forEach { $0.resume(throwing: SFTPSessionError.connectionFailed("sftp exited during connect")) }
         case .command(_, let c):
             pending = nil
             c.resume(throwing: SFTPSessionError.notConnected)
@@ -244,10 +268,22 @@ final class PersistentSFTPSession: @unchecked Sendable {
         for command in queued {
             command.cont.resume(throwing: SFTPSessionError.notConnected)
         }
+        switch pending {
+        case .connecting(let conts):
+            conts.forEach { $0.resume(throwing: SFTPSessionError.notConnected) }
+        case .command(_, let cont):
+            cont.resume(throwing: SFTPSessionError.notConnected)
+        case nil:
+            break
+        }
         masterHandle?.closeFile()
         process?.terminate()
         process = nil
         masterHandle = nil
+        pending = nil
+        isConnecting = false
+        idleTimer?.cancel()
+        idleTimer = nil
     }
 
     // MARK: - Helpers
@@ -258,6 +294,8 @@ final class PersistentSFTPSession: @unchecked Sendable {
     }
 
     private func _start(_ command: QueuedCommand) {
+        idleTimer?.cancel()
+        idleTimer = nil
         outputBuffer = ""
         pending = .command(marker: command.marker, cont: command.cont)
         _write(command.input)
@@ -267,6 +305,18 @@ final class PersistentSFTPSession: @unchecked Sendable {
         guard pending == nil, !commandQueue.isEmpty else { return }
         let next = commandQueue.removeFirst()
         _start(next)
+    }
+
+    private func _scheduleIdleTimeout() {
+        idleTimer?.cancel()
+        guard idleTimeout > 0, pending == nil, commandQueue.isEmpty else { return }
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + idleTimeout)
+        timer.setEventHandler { [weak self] in
+            self?._tearDown()
+        }
+        idleTimer = timer
+        timer.resume()
     }
 
     private func _buildArgs() -> [String] {
