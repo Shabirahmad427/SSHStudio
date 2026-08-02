@@ -78,6 +78,11 @@ struct Phase4SFTPTests {
                 "pwd",
                 "ls -la ."
             ].joined(separator: "\n")),
+            ("/media/shabir", [
+                #"cd "/media/shabir""#,
+                "pwd",
+                "ls -la ."
+            ].joined(separator: "\n")),
             ("~", [
                 "cd",
                 "pwd",
