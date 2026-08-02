@@ -62,11 +62,9 @@ class SFTPManager: ObservableObject {
     nonisolated static let sftpRequestCount = "256"
     nonisolated static func sftpListCommand(path: String) throws -> String {
         let path = try SFTPPath(path)
-        return [
-            "cd \(sftpDirectoryPath(path.rawValue))",
-            "pwd",
-            "ls -la ."
-        ].joined(separator: "\n")
+        var commands = sftpDirectoryCommands(for: path.rawValue)
+        commands += ["pwd", "ls -la ."]
+        return commands.joined(separator: "\n")
     }
 
     var canGoBack: Bool { history.canGoBack }
@@ -2149,12 +2147,12 @@ class SFTPManager: ObservableObject {
         "\"\(value.replacingOccurrences(of: "\"", with: "\\\""))\""
     }
 
-    nonisolated private static func sftpDirectoryPath(_ value: String) -> String {
-        if value == "~" { return "~" }
+    nonisolated private static func sftpDirectoryCommands(for value: String) -> [String] {
+        if value == "~" { return ["cd"] }
         if value.hasPrefix("~/") {
-            return "~/\(sftpLocalPath(String(value.dropFirst(2))))"
+            return ["cd", "cd \(sftpLocalPath(String(value.dropFirst(2))))"]
         }
-        return sftpLocalPath(value)
+        return ["cd \(sftpLocalPath(value))"]
     }
 
     nonisolated private static func sftpRemotePath(_ value: String) -> String {

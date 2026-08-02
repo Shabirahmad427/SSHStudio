@@ -79,12 +79,13 @@ struct Phase4SFTPTests {
                 "ls -la ."
             ].joined(separator: "\n")),
             ("~", [
-                "cd ~",
+                "cd",
                 "pwd",
                 "ls -la ."
             ].joined(separator: "\n")),
             ("~/Project Files", [
-                #"cd ~/"Project Files""#,
+                "cd",
+                #"cd "Project Files""#,
                 "pwd",
                 "ls -la ."
             ].joined(separator: "\n"))
@@ -104,7 +105,7 @@ struct Phase4SFTPTests {
 
     @Test func sftpPwdOutputResolvesDisplayedDirectoryPerProfile() {
         let homeOutput = """
-        sftp> cd ~
+        sftp> cd
         sftp> pwd
         Remote working directory: /home/remote-account
         sftp> ls -la .
