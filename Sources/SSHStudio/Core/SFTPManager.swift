@@ -60,6 +60,14 @@ class SFTPManager: ObservableObject {
     private var refreshTask: Task<Void, Never>?
     nonisolated static let sftpBufferSize = "65536"
     nonisolated static let sftpRequestCount = "256"
+    nonisolated static func sftpListCommand(path: String) throws -> String {
+        let path = try SFTPPath(path)
+        return [
+            "cd \(sftpDirectoryPath(path.rawValue))",
+            "pwd",
+            "ls -la ."
+        ].joined(separator: "\n")
+    }
 
     var canGoBack: Bool { history.canGoBack }
     var canGoForward: Bool { history.canGoForward }
@@ -188,10 +196,10 @@ class SFTPManager: ObservableObject {
         let listStart = ContinuousClock.now
         do {
             let sftp = try await getPersistentSFTP(for: session)
-            let lsFlag = showHiddenFiles ? "-la" : "-lA"
-            let output = try await sftp.run("ls \(lsFlag) \(Self.sftpRemotePath(path))")
+            let output = try await sftp.run(Self.sftpListCommand(path: path))
             try Task.checkCancellation()
             let parseStart = ContinuousClock.now
+            let resolvedPath = Self.resolvedPath(from: output) ?? path
             let parsed = await Task.detached(priority: .userInitiated) {
                 Self.parse(lsOutput: output)
             }.value
@@ -201,7 +209,7 @@ class SFTPManager: ObservableObject {
             guard requestID == activeListingRequestID else { return }
             let wasFirstListing = files.isEmpty
             dirCache.set(parsed, for: cacheKey)
-            applyListing(parsed, path: path, pushHistory: pushHistory, requestID: requestID, cached: false)
+            applyListing(parsed, path: resolvedPath, pushHistory: pushHistory, requestID: requestID, cached: false)
             let phase: SFTPPerformancePhase = wasFirstListing ? .firstDirectoryListing : .subsequentDirectoryListing
             await SFTPPerformanceRecorder.shared.record(phase, start: listStart, entryCount: parsed.count, requestID: requestID, cacheState: "network")
         } catch is CancellationError {
@@ -262,8 +270,19 @@ class SFTPManager: ObservableObject {
         pushHistory: Bool,
         listStart: ContinuousClock.Instant
     ) async {
-        let lsFlag = showHiddenFiles ? "-la" : "-lA"
-        let result = await runSFTPBatchListing(session: session, path: path, lsFlag: lsFlag)
+        let listCommand: String
+        do {
+            listCommand = try Self.sftpListCommand(path: path)
+        } catch {
+            guard requestID == activeListingRequestID else { return }
+            isLoading = false
+            isShowingCachedListing = false
+            listingStatus = ""
+            diagnosticStatus = .connectionUnavailable
+            self.error = error.localizedDescription
+            return
+        }
+        let result = await runSFTPBatchListing(session: session, listCommand: listCommand)
         guard requestID == activeListingRequestID else { return }
         guard result.status == 0, let output = result.output else {
             isLoading = false
@@ -276,6 +295,7 @@ class SFTPManager: ObservableObject {
         }
 
         let parseStart = ContinuousClock.now
+        let resolvedPath = Self.resolvedPath(from: output) ?? path
         let parsed = await Task.detached(priority: .userInitiated) {
             Self.parse(lsOutput: output)
         }.value
@@ -283,18 +303,18 @@ class SFTPManager: ObservableObject {
         guard requestID == activeListingRequestID else { return }
         let wasFirstListing = files.isEmpty
         dirCache.set(parsed, for: cacheKey)
-        applyListing(parsed, path: path, pushHistory: pushHistory, requestID: requestID, cached: false)
+        applyListing(parsed, path: resolvedPath, pushHistory: pushHistory, requestID: requestID, cached: false)
         diagnosticStatus = .compatibilityFallbackActive
         let phase: SFTPPerformancePhase = wasFirstListing ? .firstDirectoryListing : .subsequentDirectoryListing
         await SFTPPerformanceRecorder.shared.record(phase, start: listStart, entryCount: parsed.count, requestID: requestID, cacheState: "fallback")
     }
 
-    private func runSFTPBatchListing(session: Session, path: String, lsFlag: String) async -> (status: Int32, output: String?) {
+    private func runSFTPBatchListing(session: Session, listCommand: String) async -> (status: Int32, output: String?) {
         await withCheckedContinuation { continuation in
             let batchURL = FileManager.default.temporaryDirectory
                 .appendingPathComponent("ssh-studio-sftp-list-\(UUID().uuidString).batch")
             do {
-                try ("ls \(lsFlag) \(Self.sftpRemotePath(path))\n").write(to: batchURL, atomically: true, encoding: .utf8)
+                try ("\(listCommand)\n").write(to: batchURL, atomically: true, encoding: .utf8)
             } catch {
                 continuation.resume(returning: (255, DiagnosticRedactor.redact(error.localizedDescription)))
                 return
@@ -1021,7 +1041,7 @@ class SFTPManager: ObservableObject {
             }
             guard ensured else {
                 item.status = .failed("Remote directory is not writable: \(self.currentPath)")
-                item.addDetailLine("Open a writable folder such as /media/shabir/Expansion or /media/shabir/Coaraci.")
+                item.addDetailLine("Open a writable folder for this profile and try again.")
                 completion?()
                 return
             }
@@ -1148,7 +1168,7 @@ class SFTPManager: ObservableObject {
             guard let self else { return }
             guard ensured else {
                 item.status = .failed("Remote directory is not writable: \(parentPath)")
-                item.addDetailLine("Open a writable folder such as /media/shabir/Expansion or /media/shabir/Coaraci.")
+                item.addDetailLine("Open a writable folder for this profile and try again.")
                 completion?()
                 return
             }
@@ -1180,7 +1200,7 @@ class SFTPManager: ObservableObject {
             guard let self else { return }
             guard ensured else {
                 item.status = .failed("Remote directory is not writable: \(parentPath)")
-                item.addDetailLine("Open a writable folder such as /media/shabir/Expansion or /media/shabir/Coaraci.")
+                item.addDetailLine("Open a writable folder for this profile and try again.")
                 completion?()
                 return
             }
@@ -2107,15 +2127,37 @@ class SFTPManager: ObservableObject {
         return nil
     }
 
+    nonisolated static func resolvedPath(from output: String) -> String? {
+        output
+            .split(whereSeparator: \.isNewline)
+            .compactMap { line -> String? in
+                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                let prefix = "Remote working directory: "
+                guard trimmed.hasPrefix(prefix) else { return nil }
+                let path = String(trimmed.dropFirst(prefix.count))
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                return path.isEmpty ? nil : path
+            }
+            .last
+    }
+
     private static func sftpArguments(for session: Session, batchURL: URL) -> [String] {
         (try? SSHCommandBuilder.sftpInvocation(for: session, batchURL: batchURL).arguments) ?? []
     }
 
-    private static func sftpLocalPath(_ value: String) -> String {
+    nonisolated private static func sftpLocalPath(_ value: String) -> String {
         "\"\(value.replacingOccurrences(of: "\"", with: "\\\""))\""
     }
 
-    private static func sftpRemotePath(_ value: String) -> String {
+    nonisolated private static func sftpDirectoryPath(_ value: String) -> String {
+        if value == "~" { return "~" }
+        if value.hasPrefix("~/") {
+            return "~/\(sftpLocalPath(String(value.dropFirst(2))))"
+        }
+        return sftpLocalPath(value)
+    }
+
+    nonisolated private static func sftpRemotePath(_ value: String) -> String {
         if value == "~" { return "." }
         if value.hasPrefix("~/") {
             return sftpLocalPath(String(value.dropFirst(2)))

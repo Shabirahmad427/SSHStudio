@@ -56,8 +56,78 @@ struct Phase4SFTPTests {
         }
     }
 
+    @Test func sftpListingCommandUsesPortableLongHiddenFlagAndEscapesPaths() throws {
+        let cases = [
+            ("/", [
+                #"cd "/""#,
+                "pwd",
+                "ls -la ."
+            ].joined(separator: "\n")),
+            ("/srv/Project Files", [
+                #"cd "/srv/Project Files""#,
+                "pwd",
+                "ls -la ."
+            ].joined(separator: "\n")),
+            ("/srv/unicode-é", [
+                #"cd "/srv/unicode-é""#,
+                "pwd",
+                "ls -la ."
+            ].joined(separator: "\n")),
+            (#"/srv/quoted "name""#, [
+                #"cd "/srv/quoted \"name\"""#,
+                "pwd",
+                "ls -la ."
+            ].joined(separator: "\n")),
+            ("~", [
+                "cd ~",
+                "pwd",
+                "ls -la ."
+            ].joined(separator: "\n")),
+            ("~/Project Files", [
+                #"cd ~/"Project Files""#,
+                "pwd",
+                "ls -la ."
+            ].joined(separator: "\n"))
+        ]
+
+        for (path, expected) in cases {
+            let command = try SFTPManager.sftpListCommand(path: path)
+            #expect(command == expected)
+            #expect(!command.contains("-A"))
+            #expect(!command.contains("lA"))
+        }
+
+        #expect(throws: SFTPError.invalidRemotePath) {
+            try SFTPManager.sftpListCommand(path: "/tmp/bad\npath")
+        }
+    }
+
+    @Test func sftpPwdOutputResolvesDisplayedDirectoryPerProfile() {
+        let homeOutput = """
+        sftp> cd ~
+        sftp> pwd
+        Remote working directory: /home/remote-account
+        sftp> ls -la .
+        """
+        let rootOutput = """
+        Remote working directory: /
+        """
+        let mediaOutput = """
+        Remote working directory: /media/shabir
+        """
+
+        #expect(SFTPManager.resolvedPath(from: homeOutput) == "/home/remote-account")
+        #expect(SFTPManager.resolvedPath(from: rootOutput) == "/")
+        #expect(SFTPManager.resolvedPath(from: mediaOutput) == "/media/shabir")
+        #expect(SFTPManager.resolvedPath(from: "Remote working directory: /home/other") == "/home/other")
+    }
+
     @Test func directoryParserHandlesLongListingFixtures() throws {
         let output = """
+        Remote working directory: /home/remote-account
+        drwxr-xr-x  8 user group      4096 Jul 23 19:58 .
+        drwxr-xr-x 18 user group      4096 Jul 23 19:57 ..
+        drwxr-xr-x  2 user group      4096 Jul 23 19:59 .config
         drwxr-xr-x  2 user group      4096 Jul 23 20:00 Project Files
         -rw-r--r--  1 user group       128 Jul 23 20:01 report 'draft'.txt
         lrwxr-xr-x  1 user group        12 Jul 23 20:02 latest -> Project Files
@@ -65,10 +135,13 @@ struct Phase4SFTPTests {
 
         let entries = try SFTPDirectoryParser.parseListing(output)
 
-        #expect(entries.count == 3)
-        #expect(entries[0].name == "Project Files")
+        #expect(entries.count == 4)
+        #expect(entries.map(\.name).contains(".") == false)
+        #expect(entries.map(\.name).contains("..") == false)
+        #expect(entries[0].name == ".config")
         #expect(entries[0].isDirectory == true)
-        #expect(entries[1].name == "report 'draft'.txt")
+        #expect(entries[1].name == "Project Files")
+        #expect(entries[2].name == "report 'draft'.txt")
     }
 
     @Test func sftpInvocationBuilderUsesSharedSecurityPolicy() throws {
