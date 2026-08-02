@@ -85,4 +85,9 @@ struct Phase4SFTPTests {
         #expect(invocation.redactedDescription.contains("sftp"))
         #expect(!invocation.arguments.contains("-oStrictHostKeyChecking=no"))
     }
+
+    @Test func editableRemotePathInputTrimsAndRejectsEmptyDrafts() {
+        #expect(EditableRemotePathInput.committedPath(from: "  ~/work/project  ") == "~/work/project")
+        #expect(EditableRemotePathInput.committedPath(from: "\n\t  ") == nil)
+    }
 }

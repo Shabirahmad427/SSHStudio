@@ -1796,6 +1796,9 @@ struct PaneHeader: View {
     var onHome: (() -> Void)? = nil
     var onNewFolder: (() -> Void)? = nil
     var onNewFile: (() -> Void)? = nil
+    @State private var isEditingPath = false
+    @State private var draftPath = ""
+    @FocusState private var pathFieldFocused: Bool
 
     var body: some View {
         HStack(spacing: 3) {
@@ -1820,49 +1823,85 @@ struct PaneHeader: View {
                 .buttonStyle(PaneHeaderButtonStyle())
                 .disabled(!canGoForward)
                 .help("Go forward")
-            ScrollViewReader { proxy in
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 2) {
-                        ForEach(Array(breadcrumbs.enumerated()), id: \.offset) { index, crumb in
-                            if index > 0 {
-                                Image(systemName: "chevron.right")
-                                    .font(.system(size: 9, weight: .semibold))
-                                    .foregroundStyle(.tertiary)
+            Group {
+                if isEditingPath {
+                    TextField("Directory", text: $draftPath)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 12, design: .monospaced))
+                        .focused($pathFieldFocused)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .onSubmit(commitEditedPath)
+                        .onExitCommand { cancelPathEditing() }
+                        .onAppear {
+                            draftPath = path
+                            DispatchQueue.main.async {
+                                pathFieldFocused = true
                             }
-                            Button {
-                                onNavigatePath?(crumb.path)
-                            } label: {
-                                Text(crumb.label)
-                                    .font(.system(size: 12, design: .monospaced))
-                                    .lineLimit(1)
-                                    .foregroundStyle(index == breadcrumbs.count - 1 ? .primary : .secondary)
-                                    .padding(.horizontal, 4)
-                                    .padding(.vertical, 2)
-                                    .tahoeMagnifyGlass(
-                                        isActive: index == breadcrumbs.count - 1,
-                                        tint: Color.accentColor,
-                                        cornerRadius: 5,
-                                        scale: 1.14,
-                                        response: 0.48,
-                                        dampingFraction: 0.95
-                                    )
-                                    .contentShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
-                            }
-                            .id(index)
-                            .buttonStyle(.plain)
-                            .disabled(onNavigatePath == nil)
-                            .help("Go to \(crumb.path)")
                         }
+                } else {
+                    ScrollViewReader { proxy in
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 2) {
+                                ForEach(Array(breadcrumbs.enumerated()), id: \.offset) { index, crumb in
+                                    if index > 0 {
+                                        Image(systemName: "chevron.right")
+                                            .font(.system(size: 9, weight: .semibold))
+                                            .foregroundStyle(.tertiary)
+                                    }
+                                    Button {
+                                        onNavigatePath?(crumb.path)
+                                    } label: {
+                                        Text(crumb.label)
+                                            .font(.system(size: 12, design: .monospaced))
+                                            .lineLimit(1)
+                                            .foregroundStyle(index == breadcrumbs.count - 1 ? .primary : .secondary)
+                                            .padding(.horizontal, 4)
+                                            .padding(.vertical, 2)
+                                            .tahoeMagnifyGlass(
+                                                isActive: index == breadcrumbs.count - 1,
+                                                tint: Color.accentColor,
+                                                cornerRadius: 5,
+                                                scale: 1.14,
+                                                response: 0.48,
+                                                dampingFraction: 0.95
+                                            )
+                                            .contentShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                                    }
+                                    .id(index)
+                                    .buttonStyle(.plain)
+                                    .disabled(onNavigatePath == nil)
+                                    .help("Go to \(crumb.path)")
+                                }
+                            }
+                            .padding(.horizontal, 2)
+                            .padding(.vertical, 2)
+                        }
+                        .onAppear { scrollToCurrentBreadcrumb(proxy) }
+                        .onChange(of: path) { scrollToCurrentBreadcrumb(proxy) }
                     }
-                    .padding(.horizontal, 2)
-                    .padding(.vertical, 2)
                 }
-                .onAppear { scrollToCurrentBreadcrumb(proxy) }
-                .onChange(of: path) { scrollToCurrentBreadcrumb(proxy) }
             }
             .background(.quaternary.opacity(0.50), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
             .frame(minWidth: 0, maxWidth: .infinity)
+            .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .onTapGesture(count: 2) {
+                beginPathEditing()
+            }
+            .onChange(of: path) { _, newPath in
+                if !isEditingPath {
+                    draftPath = newPath
+                }
+            }
             Spacer()
+            Button {
+                beginPathEditing()
+            } label: {
+                Image(systemName: "pencil").font(.system(size: 9, weight: .bold))
+            }
+            .buttonStyle(PaneHeaderButtonStyle())
+            .disabled(onNavigatePath == nil)
+            .help("Edit directory path")
             Menu {
                 Button {
                     copyToPasteboard(path)
@@ -1987,8 +2026,40 @@ struct PaneHeader: View {
         NSPasteboard.general.setString(value, forType: .string)
     }
 
+    private func beginPathEditing() {
+        guard onNavigatePath != nil else { return }
+        draftPath = path
+        isEditingPath = true
+        DispatchQueue.main.async {
+            pathFieldFocused = true
+        }
+    }
+
+    private func commitEditedPath() {
+        guard let committedPath = EditableRemotePathInput.committedPath(from: draftPath) else {
+            cancelPathEditing()
+            return
+        }
+        isEditingPath = false
+        pathFieldFocused = false
+        onNavigatePath?(committedPath)
+    }
+
+    private func cancelPathEditing() {
+        draftPath = path
+        isEditingPath = false
+        pathFieldFocused = false
+    }
+
     private func shellPathForCommand(_ value: String) -> String {
         SSHSecurity.remoteShellPath(value)
+    }
+}
+
+enum EditableRemotePathInput {
+    static func committedPath(from draft: String) -> String? {
+        let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 }
 
