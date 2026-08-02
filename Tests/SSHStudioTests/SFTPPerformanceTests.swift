@@ -99,6 +99,62 @@ struct SFTPPerformanceTests {
         #expect(await optimized.processLaunches == 1)
     }
 
+    @Test func promptDetectorHandlesSplitAndMultiplePrompts() {
+        var detector = SFTPPromptDetector()
+        detector.append("Connected\nsf")
+        #expect(detector.consumePrompt() == nil)
+        detector.append("tp> ")
+        #expect(detector.consumePrompt() == "Connected\n")
+
+        detector.append("one\nsftp> two\nsftp> ")
+        #expect(detector.consumePrompt() == "one\n")
+        #expect(detector.consumePrompt() == "two\n")
+    }
+
+    @Test func promptDetectorIgnoresPromptLikeFilename() {
+        var detector = SFTPPromptDetector()
+        detector.append("-rw-r--r-- 1 u g 1 Aug 2 10:00 report-sftp> .txt\nsftp> ")
+        let output = detector.consumePrompt()
+        #expect(output?.contains("report-sftp> .txt") == true)
+        #expect(detector.consumePrompt() == nil)
+    }
+
+    @Test func startupExitClassifierSeparatesSecurityFromCompatibility() {
+        let compatibility = SFTPExitClassifier.classifyStartupFailure(output: "Connection closed\n", exitStatus: 255)
+        #expect(compatibility.allowsCompatibilityFallback)
+
+        let auth = SFTPExitClassifier.classifyStartupFailure(output: "Permission denied\n", exitStatus: 255)
+        #expect(!auth.allowsCompatibilityFallback)
+        if case .authenticationFailed = auth {} else {
+            Issue.record("Expected authentication failure")
+        }
+
+        let hostKey = SFTPExitClassifier.classifyStartupFailure(output: "Host key verification failed\n", exitStatus: 255)
+        #expect(!hostKey.allowsCompatibilityFallback)
+        if case .hostVerificationFailed = hostKey {} else {
+            Issue.record("Expected host verification failure")
+        }
+    }
+
+    @Test func persistentCapabilityCircuitBreakerRetriesOnlyAfterReset() {
+        let profileID = UUID()
+        var breaker = SFTPPersistentCapabilityCircuitBreaker()
+
+        #expect(breaker.shouldAttemptPersistent(profileID: profileID))
+        breaker.markCompatibilityUnavailable(profileID: profileID)
+        #expect(!breaker.shouldAttemptPersistent(profileID: profileID))
+
+        breaker.reset(profileID: profileID)
+        #expect(breaker.shouldAttemptPersistent(profileID: profileID))
+    }
+
+    @Test func fallbackIsAllowedOnlyForCompatibilityErrors() {
+        #expect(SFTPSessionError.compatibilityUnavailable("closed").allowsCompatibilityFallback)
+        #expect(!SFTPSessionError.authenticationFailed("denied").allowsCompatibilityFallback)
+        #expect(!SFTPSessionError.hostVerificationFailed("changed").allowsCompatibilityFallback)
+        #expect(!SFTPSessionError.securityPolicyFailed("invalid").allowsCompatibilityFallback)
+    }
+
     private static func fixtureListing(count: Int) -> String {
         (0..<count).map { index in
             let name = index.isMultiple(of: 10)

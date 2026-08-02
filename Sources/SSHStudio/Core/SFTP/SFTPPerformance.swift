@@ -137,3 +137,23 @@ struct SFTPDirectoryCache {
         }
     }
 }
+
+struct SFTPPersistentCapabilityCircuitBreaker {
+    private var unavailableProfiles: Set<UUID> = []
+
+    func shouldAttemptPersistent(profileID: UUID) -> Bool {
+        !unavailableProfiles.contains(profileID)
+    }
+
+    mutating func markCompatibilityUnavailable(profileID: UUID) {
+        unavailableProfiles.insert(profileID)
+    }
+
+    mutating func reset(profileID: UUID) {
+        unavailableProfiles.remove(profileID)
+    }
+
+    mutating func resetAll() {
+        unavailableProfiles.removeAll()
+    }
+}

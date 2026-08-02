@@ -3,13 +3,114 @@ import Foundation
 
 enum SFTPSessionError: LocalizedError {
     case connectionFailed(String)
+    case compatibilityUnavailable(String)
+    case authenticationFailed(String)
+    case hostVerificationFailed(String)
+    case securityPolicyFailed(String)
+    case startupTimeout
+    case commandTimeout
     case notConnected
 
     var errorDescription: String? {
         switch self {
         case .connectionFailed(let m): return "SFTP connection failed: \(m)"
+        case .compatibilityUnavailable(let m): return "Persistent SFTP compatibility unavailable: \(m)"
+        case .authenticationFailed(let m): return "SFTP authentication failed: \(m)"
+        case .hostVerificationFailed(let m): return "SFTP host verification failed: \(m)"
+        case .securityPolicyFailed(let m): return "SFTP security policy failed: \(m)"
+        case .startupTimeout: return "SFTP session startup timed out"
+        case .commandTimeout: return "SFTP command timed out"
         case .notConnected: return "SFTP session not connected"
         }
+    }
+
+    var allowsCompatibilityFallback: Bool {
+        if case .compatibilityUnavailable = self { return true }
+        return false
+    }
+}
+
+enum SFTPProtocolState: Equatable, Sendable {
+    case idle
+    case launching
+    case awaitingReady
+    case ready
+    case executing(String)
+    case cancelling(String)
+    case closing
+    case exited
+    case failed(String)
+}
+
+enum SFTPExitClassifier {
+    static func classifyStartupFailure(output: String, exitStatus: Int32?) -> SFTPSessionError {
+        let lowercased = output.lowercased()
+        if lowercased.contains("remote host identification has changed")
+            || lowercased.contains("host key verification failed")
+            || lowercased.contains("offending key")
+            || lowercased.contains("the authenticity of host") {
+            return .hostVerificationFailed("host verification failed")
+        }
+        if lowercased.contains("permission denied")
+            || lowercased.contains("password:")
+            || lowercased.contains("passphrase")
+            || lowercased.contains("verification code") {
+            return .authenticationFailed("authentication failed")
+        }
+        if lowercased.contains("bad configuration option")
+            || lowercased.contains("unsupported option")
+            || lowercased.contains("invalid port")
+            || lowercased.contains("illegal option") {
+            return .securityPolicyFailed("invalid SSH/SFTP invocation")
+        }
+        if lowercased.contains("connection closed")
+            || lowercased.contains("connection lost")
+            || lowercased.contains("received message too long")
+            || exitStatus != nil {
+            return .compatibilityUnavailable("persistent session closed before readiness")
+        }
+        return .connectionFailed("sftp exited before readiness")
+    }
+}
+
+struct SFTPPromptDetector {
+    private(set) var buffer = ""
+
+    mutating func append(_ text: String) {
+        buffer += text
+        if buffer.count > 128_000 {
+            buffer = String(buffer.suffix(128_000))
+        }
+    }
+
+    mutating func consumePrompt() -> String? {
+        guard let range = promptRange(in: buffer) else { return nil }
+        let output = String(buffer[..<range.lowerBound])
+        buffer = String(buffer[range.upperBound...])
+        return output
+    }
+
+    private func promptRange(in value: String) -> Range<String.Index>? {
+        var searchStart = value.startIndex
+        while let range = value.range(of: "sftp>", range: searchStart..<value.endIndex) {
+            let atLineBoundary = range.lowerBound == value.startIndex
+                || value[value.index(before: range.lowerBound)].isNewline
+                || value[value.index(before: range.lowerBound)] == "\r"
+            let after = range.upperBound
+            let hasPromptSuffix = after == value.endIndex
+                || value[after] == " "
+                || value[after].isNewline
+                || value[after] == "\r"
+            if atLineBoundary, hasPromptSuffix {
+                var end = after
+                while end < value.endIndex, value[end] == " " {
+                    end = value.index(after: end)
+                }
+                return range.lowerBound..<end
+            }
+            searchStart = range.upperBound
+        }
+        return nil
     }
 }
 
@@ -29,8 +130,9 @@ final class PersistentSFTPSession: @unchecked Sendable {
     private let queue = DispatchQueue(label: "com.sshstudio.sftp-session")
     private var process: Process?
     private var masterHandle: FileHandle?
-    private var outputBuffer = ""
+    private var promptDetector = SFTPPromptDetector()
     private var isConnecting = false
+    private var state: SFTPProtocolState = .idle
     private let maxQueuedCommands: Int
     private let idleTimeout: TimeInterval
     private var idleTimer: DispatchSourceTimer?
@@ -79,6 +181,7 @@ final class PersistentSFTPSession: @unchecked Sendable {
             return
         }
         isConnecting = true
+        state = .launching
 
         // ── Remove stale control socket ───────────────────────────────────────
         // If a previous master died without cleaning up its socket file, ssh will
@@ -131,10 +234,10 @@ final class PersistentSFTPSession: @unchecked Sendable {
         let mHandle = FileHandle(fileDescriptor: masterFD, closeOnDealloc: true)
         let reader = PipeReader(fileHandle: mHandle)
 
-        p.terminationHandler = { [weak self] _ in
+        p.terminationHandler = { [weak self] process in
             reader.waitUntilFinished()
             guard let self else { return }
-            self.queue.async { self._onProcessExit() }
+            self.queue.async { self._onProcessExit(status: process.terminationStatus) }
         }
 
         do {
@@ -162,6 +265,7 @@ final class PersistentSFTPSession: @unchecked Sendable {
 
         // sftp will print "sftp> " once it is connected and ready.
         pending = .connecting(conts: [cont])
+        state = .awaitingReady
     }
 
     // MARK: - Execute
@@ -201,15 +305,15 @@ final class PersistentSFTPSession: @unchecked Sendable {
     // MARK: - Output handling
 
     private func _onOutput(_ text: String) {
-        outputBuffer += text
+        promptDetector.append(text)
         switch pending {
 
         case .connecting(let conts):
             // sftp prints "sftp> " once the connection is established and it is ready.
-            guard outputBuffer.contains("sftp> ") else { return }
-            outputBuffer = ""
+            guard promptDetector.consumePrompt() != nil else { return }
             pending = nil
             isConnecting = false
+            state = .ready
             conts.forEach { $0.resume() }
             _scheduleIdleTimeout()
 
@@ -217,13 +321,14 @@ final class PersistentSFTPSession: @unchecked Sendable {
             // We wait until:
             //   1. The marker (from !printf) appears in the output, AND
             //   2. An "sftp> " prompt appears after it (confirming sftp is ready again).
-            guard outputBuffer.contains(marker) else { return }
-            guard let markerRange = outputBuffer.range(of: marker),
-                  outputBuffer[markerRange.upperBound...].contains("sftp> ") else { return }
+            guard promptDetector.buffer.contains(marker) else { return }
+            guard let commandOutput = promptDetector.consumePrompt(),
+                  let markerRange = commandOutput.range(of: marker)
+            else { return }
 
-            let output = String(outputBuffer[outputBuffer.startIndex..<markerRange.lowerBound])
-            outputBuffer = ""
+            let output = String(commandOutput[commandOutput.startIndex..<markerRange.lowerBound])
             pending = nil
+            state = .ready
             cont.resume(returning: output)
             _startNextCommandIfNeeded()
             if pending == nil {
@@ -235,16 +340,18 @@ final class PersistentSFTPSession: @unchecked Sendable {
         }
     }
 
-    private func _onProcessExit() {
+    private func _onProcessExit(status: Int32? = nil) {
         process = nil
         isConnecting = false
+        state = .exited
         switch pending {
         case .connecting(let conts):
             pending = nil
-            conts.forEach { $0.resume(throwing: SFTPSessionError.connectionFailed("sftp exited during connect")) }
+            let error = SFTPExitClassifier.classifyStartupFailure(output: promptDetector.buffer, exitStatus: status)
+            conts.forEach { $0.resume(throwing: error) }
         case .command(_, let c):
             pending = nil
-            c.resume(throwing: SFTPSessionError.notConnected)
+            c.resume(throwing: SFTPSessionError.compatibilityUnavailable("persistent session closed during command"))
         case nil:
             break
         }
@@ -282,6 +389,7 @@ final class PersistentSFTPSession: @unchecked Sendable {
         masterHandle = nil
         pending = nil
         isConnecting = false
+        state = .closing
         idleTimer?.cancel()
         idleTimer = nil
     }
@@ -296,8 +404,9 @@ final class PersistentSFTPSession: @unchecked Sendable {
     private func _start(_ command: QueuedCommand) {
         idleTimer?.cancel()
         idleTimer = nil
-        outputBuffer = ""
+        promptDetector = SFTPPromptDetector()
         pending = .command(marker: command.marker, cont: command.cont)
+        state = .executing(command.marker)
         _write(command.input)
     }
 

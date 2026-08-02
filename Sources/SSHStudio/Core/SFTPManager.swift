@@ -28,6 +28,14 @@ struct RemoteFile: Identifiable, Equatable, Sendable {
     }
 }
 
+enum SFTPDiagnosticStatus: String, Equatable, Sendable {
+    case persistentActive = "Persistent session active"
+    case compatibilityFallbackActive = "Compatibility fallback active"
+    case authenticationFailed = "Authentication failed"
+    case hostVerificationRequired = "Host verification required"
+    case connectionUnavailable = "Connection unavailable"
+}
+
 @MainActor
 class SFTPManager: ObservableObject {
     @Published var files: [RemoteFile] = []
@@ -37,6 +45,7 @@ class SFTPManager: ObservableObject {
     @Published var showHiddenFiles = false
     @Published var isShowingCachedListing = false
     @Published var listingStatus: String = ""
+    @Published var diagnosticStatus: SFTPDiagnosticStatus?
 
     let fileSync = TempFileSync()
     let history = NavigationHistory<String>(initial: "~")
@@ -44,6 +53,7 @@ class SFTPManager: ObservableObject {
     private var hasConnected = false
     private var dirCache = SFTPDirectoryCache()
     private var persistentSFTP: PersistentSFTPSession?
+    private var persistentCapability = SFTPPersistentCapabilityCircuitBreaker()
     private var activeListingTask: Task<Void, Never>?
     private var activeListingRequestID: UInt64 = 0
     private var inFlightListingKeys: Set<SFTPListingCacheKey> = []
@@ -80,6 +90,8 @@ class SFTPManager: ObservableObject {
         // Tear down the old persistent session whenever the target server changes.
         persistentSFTP?.disconnect()
         persistentSFTP = nil
+        persistentCapability.resetAll()
+        diagnosticStatus = nil
         activeListingTask?.cancel()
         activeListingTask = nil
         dirCache.removeAll()
@@ -103,11 +115,15 @@ class SFTPManager: ObservableObject {
 
     /// Returns the live persistent SFTP session, connecting it lazily on first use.
     private func getPersistentSFTP(for session: Session) async throws -> PersistentSFTPSession {
+        if !persistentCapability.shouldAttemptPersistent(profileID: session.id) {
+            throw SFTPSessionError.compatibilityUnavailable("persistent startup disabled for this app session")
+        }
         if let existing = persistentSFTP, existing.isAlive { return existing }
         persistentSFTP?.disconnect()
         let sftp = PersistentSFTPSession(session: session)
         try await sftp.connect()
         persistentSFTP = sftp
+        diagnosticStatus = .persistentActive
         return sftp
     }
 
@@ -193,6 +209,37 @@ class SFTPManager: ObservableObject {
                 isLoading = false
                 listingStatus = ""
             }
+        } catch let error as SFTPSessionError where error.allowsCompatibilityFallback {
+            persistentSFTP?.disconnect()
+            persistentSFTP = nil
+            persistentCapability.markCompatibilityUnavailable(profileID: session.id)
+            diagnosticStatus = .compatibilityFallbackActive
+            await loadListingWithOneOffFallback(
+                session: session,
+                path: path,
+                cacheKey: cacheKey,
+                requestID: requestID,
+                pushHistory: pushHistory,
+                listStart: listStart
+            )
+        } catch let error as SFTPSessionError {
+            if requestID == activeListingRequestID {
+                persistentSFTP?.disconnect()
+                persistentSFTP = nil
+                isLoading = false
+                isShowingCachedListing = false
+                listingStatus = ""
+                switch error {
+                case .authenticationFailed:
+                    diagnosticStatus = .authenticationFailed
+                case .hostVerificationFailed:
+                    diagnosticStatus = .hostVerificationRequired
+                default:
+                    diagnosticStatus = .connectionUnavailable
+                }
+                let message = DiagnosticRedactor.redact(error.localizedDescription)
+                self.error = message.isEmpty ? "Failed to list files" : message
+            }
         } catch {
             if requestID == activeListingRequestID {
                 persistentSFTP?.disconnect()
@@ -203,6 +250,101 @@ class SFTPManager: ObservableObject {
                 let message = DiagnosticRedactor.redact(error.localizedDescription)
                 self.error = message.isEmpty ? "Failed to list files" : message
             }
+        }
+    }
+
+    private func loadListingWithOneOffFallback(
+        session: Session,
+        path: String,
+        cacheKey: SFTPListingCacheKey,
+        requestID: UInt64,
+        pushHistory: Bool,
+        listStart: ContinuousClock.Instant
+    ) async {
+        let lsFlag = showHiddenFiles ? "-la" : "-lA"
+        let result = await runSFTPBatchListing(session: session, path: path, lsFlag: lsFlag)
+        guard requestID == activeListingRequestID else { return }
+        guard result.status == 0, let output = result.output else {
+            isLoading = false
+            isShowingCachedListing = false
+            listingStatus = ""
+            diagnosticStatus = .connectionUnavailable
+            let detail = result.output?.trimmingCharacters(in: .whitespacesAndNewlines)
+            error = detail?.isEmpty == false ? DiagnosticRedactor.redact(detail!) : "Failed to list files"
+            return
+        }
+
+        let parseStart = ContinuousClock.now
+        let parsed = await Task.detached(priority: .userInitiated) {
+            Self.parse(lsOutput: output)
+        }.value
+        await SFTPPerformanceRecorder.shared.record(.parsing, start: parseStart, entryCount: parsed.count, requestID: requestID, cacheState: "fallback")
+        guard requestID == activeListingRequestID else { return }
+        let wasFirstListing = files.isEmpty
+        dirCache.set(parsed, for: cacheKey)
+        applyListing(parsed, path: path, pushHistory: pushHistory, requestID: requestID, cached: false)
+        diagnosticStatus = .compatibilityFallbackActive
+        let phase: SFTPPerformancePhase = wasFirstListing ? .firstDirectoryListing : .subsequentDirectoryListing
+        await SFTPPerformanceRecorder.shared.record(phase, start: listStart, entryCount: parsed.count, requestID: requestID, cacheState: "fallback")
+    }
+
+    private func runSFTPBatchListing(session: Session, path: String, lsFlag: String) async -> (status: Int32, output: String?) {
+        await withCheckedContinuation { continuation in
+            let batchURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("ssh-studio-sftp-list-\(UUID().uuidString).batch")
+            do {
+                try ("ls \(lsFlag) \(Self.sftpRemotePath(path))\n").write(to: batchURL, atomically: true, encoding: .utf8)
+            } catch {
+                continuation.resume(returning: (255, DiagnosticRedactor.redact(error.localizedDescription)))
+                return
+            }
+
+            let process = Process()
+            do {
+                let invocation = try SSHCommandBuilder.sftpInvocation(for: session, batchURL: batchURL)
+                process.executableURL = invocation.executableURL
+                process.arguments = Self.disableControlMaster(in: invocation.arguments)
+            } catch {
+                try? FileManager.default.removeItem(at: batchURL)
+                continuation.resume(returning: (255, DiagnosticRedactor.redact(error.localizedDescription)))
+                return
+            }
+
+            let pipe = Pipe()
+            let reader = PipeReader(pipe: pipe)
+            process.standardOutput = pipe
+            process.standardError = pipe
+            process.terminationHandler = { @Sendable process in
+                let data = reader.collectedData()
+                let output = String(data: data, encoding: .utf8)
+                try? FileManager.default.removeItem(at: batchURL)
+                Task {
+                    await SFTPPerformanceRecorder.shared.recordProcessLaunch()
+                    continuation.resume(returning: (process.terminationStatus, output))
+                }
+            }
+
+            Task { @MainActor in
+                switch await HostKeyVerificationGate.allowConnection(session: session) {
+                case .success:
+                    do {
+                        try process.run()
+                        reader.start()
+                    } catch {
+                        try? FileManager.default.removeItem(at: batchURL)
+                        continuation.resume(returning: (255, DiagnosticRedactor.redact(error.localizedDescription)))
+                    }
+                case .failure(let error):
+                    try? FileManager.default.removeItem(at: batchURL)
+                    continuation.resume(returning: (255, error.localizedDescription))
+                }
+            }
+        }
+    }
+
+    nonisolated private static func disableControlMaster(in arguments: [String]) -> [String] {
+        arguments.map { arg in
+            arg == "ControlMaster=auto" ? "ControlMaster=no" : arg
         }
     }
 
@@ -2037,6 +2179,14 @@ class SFTPManager: ObservableObject {
     private func runSSH(session: Session, command: String, completion: @escaping @MainActor (String?) -> Void) {
         runSSHWithStatus(session: session, command: command) { _, output in
             completion(output)
+        }
+    }
+
+    private func runSSHWithStatus(session: Session, command: String) async -> (status: Int32, output: String?) {
+        await withCheckedContinuation { continuation in
+            runSSHWithStatus(session: session, command: command) { status, output in
+                continuation.resume(returning: (status, output))
+            }
         }
     }
 
