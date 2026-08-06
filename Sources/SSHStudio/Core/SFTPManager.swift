@@ -52,8 +52,8 @@ class SFTPManager: ObservableObject {
     private var session: Session?
     private var hasConnected = false
     private var dirCache = SFTPDirectoryCache()
-    private var persistentSFTP: PersistentSFTPSession?
-    private var persistentSFTPConnectTask: Task<PersistentSFTPSession, Error>?
+    private var binarySFTP: SFTPBinaryClient?
+    private var binarySFTPConnectTask: Task<SFTPBinaryClient, Error>?
     private var persistentCapability = SFTPPersistentCapabilityCircuitBreaker()
     private var activeListingTask: Task<Void, Never>?
     private var activeListingRequestID: UInt64 = 0
@@ -106,10 +106,10 @@ class SFTPManager: ObservableObject {
         // the previous session — otherwise it keeps running in the background and,
         // when it eventually finishes, `getPersistentSFTP`'s completion would
         // overwrite `persistentSFTP` with a session pointed at the wrong server.
-        persistentSFTPConnectTask?.cancel()
-        persistentSFTPConnectTask = nil
-        persistentSFTP?.disconnect()
-        persistentSFTP = nil
+        binarySFTPConnectTask?.cancel()
+        binarySFTPConnectTask = nil
+        binarySFTP?.disconnect()
+        binarySFTP = nil
         persistentCapability.resetAll()
         diagnosticStatus = nil
         activeListingTask?.cancel()
@@ -133,34 +133,35 @@ class SFTPManager: ObservableObject {
         listFiles(at: Self.startDirectory(for: session))
     }
 
-    /// Returns the live persistent SFTP session, connecting it lazily on first use.
-    private func getPersistentSFTP(for session: Session) async throws -> PersistentSFTPSession {
+    /// Returns the live persistent SFTP binary-protocol client, connecting it
+    /// lazily on first use. Speaks SSH_FXP_* packets over `ssh -s sftp`
+    /// directly — no PTY, no interactive-shell text scraping.
+    private func getBinarySFTP(for session: Session) async throws -> SFTPBinaryClient {
         if !persistentCapability.shouldAttemptPersistent(profileID: session.id) {
-            throw SFTPSessionError.compatibilityUnavailable("persistent startup disabled for this app session")
+            throw SFTPBinaryError.connectionFailed("persistent startup disabled for this app session")
         }
-        if let existing = persistentSFTP, existing.isAlive { return existing }
+        if let existing = binarySFTP, existing.isAlive { return existing }
         // Coalesce concurrent callers (e.g. the initial listing plus an
         // immediate navigation) onto a single in-flight connect attempt.
-        // Without this, each caller would independently see `persistentSFTP`
-        // as nil during the first caller's `await sftp.connect()` and spin up
-        // its own redundant PersistentSFTPSession + child sftp process racing
-        // over the same ControlMaster socket.
-        if let inFlight = persistentSFTPConnectTask {
+        // Without this, each caller would independently see `binarySFTP`
+        // as nil during the first caller's `await client.connect()` and spin
+        // up its own redundant client + child ssh process.
+        if let inFlight = binarySFTPConnectTask {
             return try await inFlight.value
         }
-        persistentSFTP?.disconnect()
-        persistentSFTP = nil
-        let task = Task { () throws -> PersistentSFTPSession in
-            let sftp = PersistentSFTPSession(session: session)
-            try await sftp.connect()
-            return sftp
+        binarySFTP?.disconnect()
+        binarySFTP = nil
+        let task = Task { () throws -> SFTPBinaryClient in
+            let client = SFTPBinaryClient(session: session)
+            try await client.connect()
+            return client
         }
-        persistentSFTPConnectTask = task
-        defer { persistentSFTPConnectTask = nil }
-        let sftp = try await task.value
-        persistentSFTP = sftp
+        binarySFTPConnectTask = task
+        defer { binarySFTPConnectTask = nil }
+        let client = try await task.value
+        binarySFTP = client
         diagnosticStatus = .persistentActive
-        return sftp
+        return client
     }
 
     func listFiles(at path: String, pushHistory: Bool = true, forceRefresh: Bool = false) {
@@ -223,13 +224,25 @@ class SFTPManager: ObservableObject {
 
         let listStart = ContinuousClock.now
         do {
-            let sftp = try await getPersistentSFTP(for: session)
-            let output = try await sftp.run(Self.sftpListCommand(path: path))
+            let sftp = try await getBinarySFTP(for: session)
+            // "~" is a client-side (shell/CLI) convenience with no meaning in
+            // the SFTP wire protocol itself; "." resolves relative to the
+            // login directory the server started the session in.
+            let requestPath: String
+            if path == "~" {
+                requestPath = "."
+            } else if path.hasPrefix("~/") {
+                requestPath = "." + path.dropFirst(1)
+            } else {
+                requestPath = path
+            }
+            let resolvedPath = try await sftp.realPath(requestPath)
+            try Task.checkCancellation()
+            let entries = try await sftp.listDirectory(path: resolvedPath)
             try Task.checkCancellation()
             let parseStart = ContinuousClock.now
-            let resolvedPath = Self.resolvedPath(from: output) ?? path
             let parsed = await Task.detached(priority: .userInitiated) {
-                Self.parse(lsOutput: output)
+                entries.map { $0.asRemoteFile() }
             }.value
             await SFTPPerformanceRecorder.shared.record(.parsing, start: parseStart, entryCount: parsed.count, requestID: requestID)
             try Task.checkCancellation()
@@ -245,10 +258,9 @@ class SFTPManager: ObservableObject {
                 isLoading = false
                 listingStatus = ""
             }
-        } catch let error as SFTPSessionError where error.allowsCompatibilityFallback {
-            persistentSFTP?.disconnectAndWait()
-            persistentSFTP = nil
-            cleanupPersistentControlSocket(for: session)
+        } catch let error as SFTPBinaryError where error.allowsCompatibilityFallback {
+            binarySFTP?.disconnect()
+            binarySFTP = nil
             persistentCapability.markCompatibilityUnavailable(profileID: session.id)
             diagnosticStatus = .compatibilityFallbackActive
             await loadListingWithOneOffFallback(
@@ -259,28 +271,21 @@ class SFTPManager: ObservableObject {
                 pushHistory: pushHistory,
                 listStart: listStart
             )
-        } catch let error as SFTPSessionError {
+        } catch let error as SFTPBinaryError {
             if requestID == activeListingRequestID {
-                persistentSFTP?.disconnect()
-                persistentSFTP = nil
+                binarySFTP?.disconnect()
+                binarySFTP = nil
                 isLoading = false
                 isShowingCachedListing = false
                 listingStatus = ""
-                switch error {
-                case .authenticationFailed:
-                    diagnosticStatus = .authenticationFailed
-                case .hostVerificationFailed:
-                    diagnosticStatus = .hostVerificationRequired
-                default:
-                    diagnosticStatus = .connectionUnavailable
-                }
+                diagnosticStatus = .connectionUnavailable
                 let message = DiagnosticRedactor.redact(error.localizedDescription)
                 self.error = message.isEmpty ? "Failed to list files" : message
             }
         } catch {
             if requestID == activeListingRequestID {
-                persistentSFTP?.disconnect()
-                persistentSFTP = nil
+                binarySFTP?.disconnect()
+                binarySFTP = nil
                 isLoading = false
                 isShowingCachedListing = false
                 listingStatus = ""
@@ -388,31 +393,6 @@ class SFTPManager: ObservableObject {
                     continuation.resume(returning: (255, error.localizedDescription))
                 }
             }
-        }
-    }
-
-    private func cleanupPersistentControlSocket(for session: Session) {
-        let sockPath = SSHSecurity.controlPath(for: session)
-        guard FileManager.default.fileExists(atPath: sockPath) else { return }
-        let check = Process()
-        check.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
-        check.arguments = [
-            "-O", "check",
-            "-o", "ControlMaster=no",
-            "-o", "BatchMode=yes",
-            "-o", "ControlPath=\(sockPath)",
-            SSHSecurity.connectionTarget(for: session)
-        ]
-        check.standardOutput = FileHandle.nullDevice
-        check.standardError = FileHandle.nullDevice
-        do {
-            try check.run()
-            check.waitUntilExit()
-            if check.terminationStatus != 0 {
-                try? FileManager.default.removeItem(atPath: sockPath)
-            }
-        } catch {
-            try? FileManager.default.removeItem(atPath: sockPath)
         }
     }
 

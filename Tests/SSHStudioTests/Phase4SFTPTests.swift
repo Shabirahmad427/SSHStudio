@@ -234,6 +234,53 @@ struct Phase4SFTPTests {
         _ = try await Self.runRemote(coaraci, command: "rm -rf -- \(SSHSecurity.remoteShellPath(coaRoot))")
     }
 
+    /// Exercises the real binary SFTP protocol path (SFTPManager.listFiles ->
+    /// getBinarySFTP -> SFTPBinaryClient.realPath/listDirectory) against the
+    /// real docinho home directory, which has hundreds of entries including
+    /// unicode filenames — the exact listing that used to hang under the old
+    /// PTY/text-scraping PersistentSFTPSession implementation.
+    @Test func realBinarySFTPListingOnDocinhoWhenEnabled() async throws {
+        guard ProcessInfo.processInfo.environment["SSHSTUDIO_REAL_TRANSFER_MATRIX"] == "1" else { return }
+
+        let docinho = Session(name: "docinho", host: "docinho", username: "shabir",
+                              authentication: .privateKey(path: "~/.ssh/id_ed25519", useAgent: true, addKeysToAgent: false, useKeychain: false),
+                              privateKeyPath: "~/.ssh/id_ed25519", sshConfigAlias: "docinho")
+        let manager = SFTPManager()
+        manager.connect(to: docinho)
+
+        let deadline = ContinuousClock.now.advanced(by: .seconds(20))
+        while manager.isLoading, ContinuousClock.now < deadline {
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+
+        #expect(manager.isLoading == false, "listing never completed within 20s — session is wedged")
+        #expect(manager.error == nil, "listing failed: \(manager.error ?? "")")
+        #expect(!manager.files.isEmpty, "expected docinho home directory to list at least one entry")
+        #expect(manager.files.contains { $0.name == ".bashrc" })
+    }
+
+    /// Same as above but through the `ifi` ProxyJump path, to confirm the
+    /// binary protocol client's `ssh -s sftp` invocation transparently
+    /// tunnels through the jump host the same way the interactive CLI did.
+    @Test func realBinarySFTPListingOnCoaraciThroughProxyJumpWhenEnabled() async throws {
+        guard ProcessInfo.processInfo.environment["SSHSTUDIO_REAL_TRANSFER_MATRIX"] == "1" else { return }
+
+        let coaraci = Session(name: "sahmaddo", host: "sahmaddo", username: "sahmaddo",
+                              authentication: .privateKey(path: "~/.ssh/id_ed25519", useAgent: true, addKeysToAgent: false, useKeychain: false),
+                              privateKeyPath: "~/.ssh/id_ed25519", sshConfigAlias: "sahmaddo")
+        let manager = SFTPManager()
+        manager.connect(to: coaraci)
+
+        let deadline = ContinuousClock.now.advanced(by: .seconds(20))
+        while manager.isLoading, ContinuousClock.now < deadline {
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+
+        #expect(manager.isLoading == false, "listing never completed within 20s — session is wedged")
+        #expect(manager.error == nil, "listing failed: \(manager.error ?? "")")
+        #expect(!manager.files.isEmpty, "expected coaraci home directory to list at least one entry")
+    }
+
     private static func submit(_ request: TransferRequest, name: String,
                                sourceSession: Session? = nil, destinationSession: Session? = nil,
                                sourceManager: SFTPManager? = nil, destinationManager: SFTPManager? = nil) async -> TransferResult {
