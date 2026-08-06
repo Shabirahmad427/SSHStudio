@@ -1,6 +1,26 @@
 import Darwin
 import Foundation
 
+private enum sftpDebugLogger {
+    private static let lock = NSLock()
+    private static let path = "/tmp/sshstudio-sftp-debug.log"
+
+    static func debug(_ message: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        let line = "\(Date()) \(message)\n"
+        if let data = line.data(using: .utf8) {
+            if let handle = FileHandle(forWritingAtPath: path) {
+                handle.seekToEndOfFile()
+                handle.write(data)
+                handle.closeFile()
+            } else {
+                FileManager.default.createFile(atPath: path, contents: data)
+            }
+        }
+    }
+}
+
 enum SFTPSessionError: LocalizedError {
     case connectionFailed(String)
     case compatibilityUnavailable(String)
@@ -153,6 +173,14 @@ final class PersistentSFTPSession: @unchecked Sendable {
 
     var isAlive: Bool { process?.isRunning ?? false }
 
+    private var pendingKindDescription: String {
+        switch pending {
+        case .connecting(let conts): return "connecting(\(conts.count))"
+        case .command(let marker, _): return "command(\(marker))"
+        case nil: return "nil"
+        }
+    }
+
     init(session: Session, maxQueuedCommands: Int = 64, idleTimeout: TimeInterval = 600, commandTimeout: TimeInterval = 30) {
         self.sshSession = session
         self.maxQueuedCommands = maxQueuedCommands
@@ -251,6 +279,7 @@ final class PersistentSFTPSession: @unchecked Sendable {
             reader.start { [weak self] data in
                 guard !data.isEmpty, let self else { return }
                 let text = String(data: data, encoding: .utf8) ?? ""
+                sftpDebugLogger.debug("raw read: \(data.count) bytes, utf8ok=\(!text.isEmpty || data.isEmpty), text=\(text)")
                 self.queue.async { self._onOutput(text) }
             }
         } catch {
@@ -284,10 +313,12 @@ final class PersistentSFTPSession: @unchecked Sendable {
         let marker = "SSHSTUDIO_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
         // Send all commands then the sentinel !printf which confirms they all ran.
         let input = commands.joined(separator: "\n") + "\n!printf '\(marker)\\n'\n"
+        sftpDebugLogger.debug("run() entered marker=\(marker)")
 
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { cont in
                 queue.async {
+                    sftpDebugLogger.debug("run() on queue marker=\(marker) isAlive=\(self.isAlive) pendingKind=\(self.pendingKindDescription)")
                     guard self.isAlive, self.masterHandle != nil else {
                         cont.resume(throwing: SFTPSessionError.notConnected)
                         return
@@ -334,12 +365,17 @@ final class PersistentSFTPSession: @unchecked Sendable {
     // MARK: - Output handling
 
     private func _onOutput(_ text: String) {
+        sftpDebugLogger.debug("_onOutput pendingKind=\(self.pendingKindDescription) chunkBytes=\(text.utf8.count)")
         promptDetector.append(text)
         switch pending {
 
         case .connecting(let conts):
             // sftp prints "sftp> " once the connection is established and it is ready.
-            guard promptDetector.consumePrompt() != nil else { return }
+            guard promptDetector.consumePrompt() != nil else {
+                sftpDebugLogger.debug("connecting: no prompt yet, bufferTail=\(String(self.promptDetector.buffer.suffix(80)))")
+                return
+            }
+            sftpDebugLogger.debug("connecting: prompt matched, resolving \(conts.count) waiter(s)")
             pending = nil
             isConnecting = false
             state = .ready
