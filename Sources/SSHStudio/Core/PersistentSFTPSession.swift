@@ -136,6 +136,8 @@ final class PersistentSFTPSession: @unchecked Sendable {
     private let maxQueuedCommands: Int
     private let idleTimeout: TimeInterval
     private var idleTimer: DispatchSourceTimer?
+    private let commandTimeout: TimeInterval
+    private var commandTimeoutTimer: DispatchSourceTimer?
 
     private enum Pending {
         case connecting(conts: [CheckedContinuation<Void, Error>])
@@ -151,10 +153,11 @@ final class PersistentSFTPSession: @unchecked Sendable {
 
     var isAlive: Bool { process?.isRunning ?? false }
 
-    init(session: Session, maxQueuedCommands: Int = 64, idleTimeout: TimeInterval = 600) {
+    init(session: Session, maxQueuedCommands: Int = 64, idleTimeout: TimeInterval = 600, commandTimeout: TimeInterval = 30) {
         self.sshSession = session
         self.maxQueuedCommands = maxQueuedCommands
         self.idleTimeout = idleTimeout
+        self.commandTimeout = commandTimeout
     }
 
     deinit { _tearDown() }
@@ -282,23 +285,49 @@ final class PersistentSFTPSession: @unchecked Sendable {
         // Send all commands then the sentinel !printf which confirms they all ran.
         let input = commands.joined(separator: "\n") + "\n!printf '\(marker)\\n'\n"
 
-        return try await withCheckedThrowingContinuation { cont in
-            queue.async {
-                guard self.isAlive, self.masterHandle != nil else {
-                    cont.resume(throwing: SFTPSessionError.notConnected)
-                    return
-                }
-                let queued = QueuedCommand(input: input, marker: marker, cont: cont)
-                if self.pending != nil {
-                    guard self.commandQueue.count < self.maxQueuedCommands else {
-                        cont.resume(throwing: SFTPSessionError.connectionFailed("SFTP operation queue is full"))
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { cont in
+                queue.async {
+                    guard self.isAlive, self.masterHandle != nil else {
+                        cont.resume(throwing: SFTPSessionError.notConnected)
                         return
                     }
-                    self.commandQueue.append(queued)
-                } else {
-                    self._start(queued)
+                    let queued = QueuedCommand(input: input, marker: marker, cont: cont)
+                    if self.pending != nil {
+                        guard self.commandQueue.count < self.maxQueuedCommands else {
+                            cont.resume(throwing: SFTPSessionError.connectionFailed("SFTP operation queue is full"))
+                            return
+                        }
+                        self.commandQueue.append(queued)
+                    } else {
+                        self._start(queued)
+                    }
                 }
             }
+        } onCancel: {
+            self.cancel(marker: marker)
+        }
+    }
+
+    /// Cancels a command by marker. If it is already in flight (sent to the
+    /// child but not yet answered), we cannot safely discard just that reply —
+    /// stray output would corrupt the next command's parsing — so the whole
+    /// session is torn down and will be relaunched fresh on next use. If it is
+    /// only queued (never sent), it is simply dropped.
+    func cancel(marker: String) {
+        queue.async { self._cancel(marker: marker) }
+    }
+
+    private func _cancel(marker: String) {
+        if case .command(let m, let cont) = pending, m == marker {
+            pending = nil
+            cont.resume(throwing: CancellationError())
+            _tearDown()
+            return
+        }
+        if let index = commandQueue.firstIndex(where: { $0.marker == marker }) {
+            let queued = commandQueue.remove(at: index)
+            queued.cont.resume(throwing: CancellationError())
         }
     }
 
@@ -327,6 +356,8 @@ final class PersistentSFTPSession: @unchecked Sendable {
             else { return }
 
             let output = String(commandOutput[commandOutput.startIndex..<markerRange.lowerBound])
+            commandTimeoutTimer?.cancel()
+            commandTimeoutTimer = nil
             pending = nil
             state = .ready
             cont.resume(returning: output)
@@ -408,6 +439,8 @@ final class PersistentSFTPSession: @unchecked Sendable {
         state = .closing
         idleTimer?.cancel()
         idleTimer = nil
+        commandTimeoutTimer?.cancel()
+        commandTimeoutTimer = nil
     }
 
     // MARK: - Helpers
@@ -424,6 +457,30 @@ final class PersistentSFTPSession: @unchecked Sendable {
         pending = .command(marker: command.marker, cont: command.cont)
         state = .executing(command.marker)
         _write(command.input)
+        _scheduleCommandTimeout(marker: command.marker)
+    }
+
+    /// A last-resort safety net: if a command's completion never arrives (e.g.
+    /// a network stall with no cancellation from the caller), fail it and tear
+    /// down the session rather than wedging it — and every subsequent request —
+    /// forever behind a completion that will never come.
+    private func _scheduleCommandTimeout(marker: String) {
+        commandTimeoutTimer?.cancel()
+        guard commandTimeout > 0 else { return }
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + commandTimeout)
+        timer.setEventHandler { [weak self] in
+            self?._timeoutCommand(marker: marker)
+        }
+        commandTimeoutTimer = timer
+        timer.resume()
+    }
+
+    private func _timeoutCommand(marker: String) {
+        guard case .command(let m, let cont) = pending, m == marker else { return }
+        pending = nil
+        cont.resume(throwing: SFTPSessionError.commandTimeout)
+        _tearDown()
     }
 
     private func _startNextCommandIfNeeded() {

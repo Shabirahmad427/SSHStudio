@@ -85,6 +85,7 @@ struct SFTPPerformanceTests {
         #expect(!directory.path.hasPrefix("/tmp/ssh-studio.sock"))
         #expect(directory.path.rangeOfCharacter(from: .whitespacesAndNewlines) == nil)
         #expect(SSHSecurity.controlPath(for: agentSession).rangeOfCharacter(from: .whitespacesAndNewlines) == nil)
+        #expect(SSHSecurity.controlPath(for: agentSession).utf8.count < 100)
     }
 
     @Test func fakeBenchmarkShowsPersistentBrowsingAvoidsPerNavigationLaunches() async throws {

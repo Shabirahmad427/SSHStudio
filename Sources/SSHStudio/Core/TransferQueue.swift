@@ -22,6 +22,10 @@ class TransferItem: Identifiable, ObservableObject, @unchecked Sendable {
     let name: String
     let direction: TransferDirection
     @Published var status: TransferStatus = .queued
+    @Published var transferState: TransferState = .queued
+    @Published var selectedEngine: TransferEngine?
+    @Published var failureCause: TransferFailureCause?
+    var retryHandler: (() -> Void)?
     @Published var bytesTransferred: Int64 = 0
     @Published var totalBytes: Int64 = 0
     @Published var speedBytesPerSec: Double = 0     // bytes/s
@@ -60,6 +64,20 @@ class TransferItem: Identifiable, ObservableObject, @unchecked Sendable {
     }
 
     var statusLabel: String {
+        if transferState != .queued {
+            switch transferState {
+            case .queued: break
+            case .validating: return "Validating"
+            case .preparing: return "Preparing"
+            case .transferring: return "Transferring…"
+            case .verifying: return "Verifying"
+            case .finalizing: return "Finalizing"
+            case .completed: return "Completed"
+            case .cancelled: return "Cancelled"
+            case .partial: return "Partial"
+            case .failed: return "Failed: \(Self.truncate(failureCause?.title ?? failureLabel ?? "Transfer failed", limit: Self.maxStatusMessageLength))"
+            }
+        }
         switch status {
         case .queued:        return "Queued"
         case .preparing:     return "Preparing"
@@ -77,6 +95,7 @@ class TransferItem: Identifiable, ObservableObject, @unchecked Sendable {
     }
 
     var failureLabel: String? {
+        if let cause = failureCause { return cause.title }
         guard case .failed(let error) = status else { return nil }
         return Self.truncate(error, limit: Self.maxStatusMessageLength)
     }
@@ -98,6 +117,19 @@ class TransferItem: Identifiable, ObservableObject, @unchecked Sendable {
         recordedDetailLines = Set(detailLines)
     }
 
+    func apply(plan: TransferPlan) {
+        selectedEngine = plan.engine
+        transferState = .validating
+        addDetailLine("Engine: \(plan.engine.rawValue)")
+        addDetailLine("Destination: \(plan.finalDestination)")
+    }
+
+    func fail(_ cause: TransferFailureCause) {
+        failureCause = cause
+        transferState = cause == .cancelled ? .cancelled : .failed
+        status = cause == .cancelled ? .cancelled : .failed(cause.title)
+    }
+
     private static func truncate(_ value: String, limit: Int) -> String {
         guard value.count > limit else { return value }
         return "\(value.prefix(limit))... [truncated]"
@@ -112,6 +144,7 @@ class TransferItem: Identifiable, ObservableObject, @unchecked Sendable {
     func cancel() {
         guard !isTerminal else { return }
         isCancellationRequested = true
+        transferState = .cancelled
         runningProcess?.terminate()
     }
 

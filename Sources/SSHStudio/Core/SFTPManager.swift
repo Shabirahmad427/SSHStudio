@@ -70,6 +70,13 @@ class SFTPManager: ObservableObject {
     var canGoBack: Bool { history.canGoBack }
     var canGoForward: Bool { history.canGoForward }
 
+    func setActiveSessionForTesting(_ session: Session, currentPath: String) {
+        self.session = session
+        self.currentPath = currentPath
+        hasConnected = true
+        history.reset(to: currentPath)
+    }
+
     nonisolated static func childPath(parent: String, child: String) -> String {
         switch parent {
         case "", ".":
@@ -443,10 +450,11 @@ class SFTPManager: ObservableObject {
     }
 
     func download(remotePath: String, name: String, isDirectory: Bool, to localURL: URL,
-                  session: Session, completion: (@MainActor () -> Void)? = nil) {
-        guard let session = self.session else { return }
-        let item = TransferItem(name: name, direction: .download)
-        TransferQueue.shared.add(item)
+                  session: Session, item existingItem: TransferItem? = nil,
+                  completion: (@MainActor () -> Void)? = nil) {
+        let session = self.session ?? session
+        let item = existingItem ?? TransferItem(name: name, direction: .download)
+        if existingItem == nil { TransferQueue.shared.add(item) }
 
         guard !isDirectory else {
             downloadDirectoryTree(
@@ -460,50 +468,34 @@ class SFTPManager: ObservableObject {
             return
         }
 
-        // Single-file download via persistent SFTP — no handshake overhead.
         item.status = .inProgress
         item.startedAt = Date()
         item.profileLabel = "SFTP transfer"
         let stagedURL = localURL.deletingLastPathComponent()
             .appendingPathComponent(".\(localURL.lastPathComponent).sshstudio-download-partial")
 
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            do {
-                let sftp = try await getPersistentSFTP(for: session)
-                ConnectionLog.shared.log("Starting download: \(name)", level: .info, session: session.name)
-                _ = try await sftp.run(
-                    "get -a \(Self.sftpRemotePath(remotePath)) \(Self.sftpLocalPath(stagedURL.path))"
-                )
+        ConnectionLog.shared.log("Starting download: \(name)", level: .info, session: session.name)
+        sftpTransfer(
+            command: "get -a \(Self.sftpRemotePath(remotePath)) \(Self.sftpLocalPath(stagedURL.path))",
+            session: session, item: item, isDirectory: false
+        ) { [weak self] succeeded in
+            guard let self else {
+                completion?()
+                return
+            }
+            if succeeded {
                 self._finaliseDownload(stagedURL: stagedURL, localURL: localURL, name: name,
                                        item: item, session: session, completion: completion)
-            } catch {
-                // Persistent session failed — drop it and fall back to subprocess.
-                persistentSFTP?.disconnect()
-                persistentSFTP = nil
-                ConnectionLog.shared.log(
-                    "Persistent SFTP download failed for \(name); falling back to subprocess",
-                    level: .warning, session: session.name
+            } else {
+                self.downloadSingleFileWithRsyncFallback(
+                    remotePath: remotePath,
+                    name: name,
+                    stagedURL: stagedURL,
+                    localURL: localURL,
+                    session: session,
+                    item: item,
+                    completion: completion
                 )
-                sftpTransfer(
-                    command: "get -a \(Self.sftpRemotePath(remotePath)) \(Self.sftpLocalPath(stagedURL.path))",
-                    session: session, item: item, isDirectory: false
-                ) { succeeded in
-                    if succeeded {
-                        self._finaliseDownload(stagedURL: stagedURL, localURL: localURL, name: name,
-                                              item: item, session: session, completion: completion)
-                    } else {
-                        self.downloadSingleFileWithRsyncFallback(
-                            remotePath: remotePath,
-                            name: name,
-                            stagedURL: stagedURL,
-                            localURL: localURL,
-                            session: session,
-                            item: item,
-                            completion: completion
-                        )
-                    }
-                }
             }
         }
     }
@@ -535,7 +527,7 @@ class SFTPManager: ObservableObject {
             level: .warning,
             session: session.name
         )
-        rsyncTransfer(
+        rsyncTransferWithRetry(
             from: Self.rsyncRemoteLocation(session: session, path: remotePath),
             to: stagedURL.path,
             session: session,
@@ -660,6 +652,25 @@ class SFTPManager: ObservableObject {
                 self.cleanupPartialDownload(partialURL)
             }
             completion?()
+        } fallback: { [weak self] in
+            guard let self else { completion?(); return }
+            item.addDetailLine("Recursive SFTP transport failed; retrying with rsync")
+            self.rsyncTransfer(
+                from: self.remoteLocation(session: session, path: remotePath),
+                to: partialURL.path,
+                session: session,
+                item: item,
+                completeOnSuccess: false,
+                isDirectory: true
+            ) { synced in
+                if synced, self.finalizeDirectoryDownload(partialURL: partialURL, localURL: localURL, item: item) {
+                    item.status = .completed
+                    item.percentDone = 100
+                } else {
+                    self.cleanupPartialDownload(partialURL)
+                }
+                completion?()
+            }
         }
     }
 
@@ -779,18 +790,11 @@ class SFTPManager: ObservableObject {
         completion: (@MainActor () -> Void)? = nil
     ) {
         guard !remoteItems.isEmpty else { completion?(); return }
-        guard let session = self.session else { return }
+        let session = self.session ?? session
 
         if Self.shouldUseSingleFileDownloadPipeline(remoteItems: remoteItems),
            let remoteItem = remoteItems.first {
-            download(
-                remotePath: remoteItem.remotePath,
-                name: remoteItem.name,
-                isDirectory: false,
-                to: localURL.appendingPathComponent(remoteItem.name),
-                session: session,
-                completion: completion
-            )
+            downloadSingleFile(remoteItem: remoteItem, destination: .directory(localURL), session: session, completion: completion)
             return
         }
 
@@ -1011,54 +1015,20 @@ class SFTPManager: ObservableObject {
             completion?()
             return
         }
-        let item = TransferItem(name: localURL.lastPathComponent, direction: .upload)
-        item.profileLabel = "Saving to server…"
-        TransferQueue.shared.add(item)
         let parentPath = Self.remoteParentPath(remotePath) ?? currentPath
-        let stagedName = ".\(localURL.lastPathComponent).sshstudio-upload-\(UUID().uuidString)"
-        let stagedPath = Self.childPath(parent: parentPath, child: stagedName)
-        ensureRemoteDirectory(at: parentPath, session: activeSession) { [weak self] ensured in
-            guard let self, ensured else {
-                item.status = .failed("Could not reach remote directory")
-                completion?()
-                return
-            }
-            self.sftpTransfer(
-                command: "put -a \(Self.sftpLocalPath(localURL.path)) \(Self.sftpRemotePath(stagedPath))",
-                session: activeSession,
-                item: item,
-                isDirectory: false
-            ) { [weak self] succeeded in
-                guard let self, succeeded else { completion?(); return }
-                self.finishUpload(
-                    localName: localURL.lastPathComponent,
-                    stagedPath: stagedPath,
-                    remotePath: remotePath,
-                    session: activeSession,
-                    item: item,
-                    completion: completion
-                )
-            } fallback: { [weak self] in
-                guard let self else { return }
-                self.rsyncTransfer(
-                    from: localURL.path,
-                    to: self.remoteLocation(session: activeSession, path: stagedPath),
-                    session: activeSession,
-                    item: item,
-                    completeOnSuccess: false,
-                    isDirectory: false
-                ) { [weak self] succeeded in
-                    guard let self, succeeded else { completion?(); return }
-                    self.finishUpload(
-                        localName: localURL.lastPathComponent,
-                        stagedPath: stagedPath,
-                        remotePath: remotePath,
-                        session: activeSession,
-                        item: item,
-                        completion: completion
-                    )
-                }
-            }
+        let request = TransferRequest(
+            sourceEndpoint: .local,
+            destinationEndpoint: .remote(profileID: activeSession.id),
+            itemType: .file,
+            sourcePath: localURL.path,
+            destinationDirectory: parentPath,
+            destinationName: (remotePath as NSString).lastPathComponent,
+            conflictPolicy: .overwrite
+        )
+        TransferService.shared.submit(request, name: localURL.lastPathComponent,
+                                      destinationSession: activeSession,
+                                      destinationManager: self) { _ in
+            completion?()
         }
     }
 
@@ -1076,11 +1046,13 @@ class SFTPManager: ObservableObject {
         uploadSingleFile(localURL: localURL, remotePath: remotePath, session: session, item: item, completion: completion)
     }
 
-    private func uploadDirectoryTree(localURL: URL, session: Session, completion: (@MainActor () -> Void)? = nil) {
-        let remoteRootPath = Self.childPath(parent: currentPath, child: localURL.lastPathComponent)
-        let item = TransferItem(name: localURL.lastPathComponent, direction: .upload)
+    private func uploadDirectoryTree(localURL: URL, session: Session, remoteRootPath explicitRemoteRootPath: String? = nil,
+                                     item existingItem: TransferItem? = nil,
+                                     completion: (@MainActor () -> Void)? = nil) {
+        let remoteRootPath = explicitRemoteRootPath ?? Self.childPath(parent: currentPath, child: localURL.lastPathComponent)
+        let item = existingItem ?? TransferItem(name: localURL.lastPathComponent, direction: .upload)
         item.profileLabel = "Fast folder upload"
-        TransferQueue.shared.add(item)
+        if existingItem == nil { TransferQueue.shared.add(item) }
 
         item.addDetailLine("Local: \(localURL.path)")
         item.addDetailLine("Remote: \(remoteRootPath)")
@@ -1091,47 +1063,34 @@ class SFTPManager: ObservableObject {
                 return
             }
             guard ensured else {
-                item.status = .failed("Remote directory is not writable: \(self.currentPath)")
-                item.addDetailLine("Open a writable folder for this profile and try again.")
+                item.status = .failed("Could not create or access remote directory: \(self.currentPath)")
+                item.addDetailLine("Check the remote folder permissions for this profile and try again.")
                 completion?()
                 return
             }
 
-            self.rsyncTransfer(
-                from: localURL.path,
-                to: self.remoteLocation(session: session, path: self.currentPath),
+            self.uploadDirectoryTreeWithSFTP(
+                localURL: localURL,
+                remoteRootPath: remoteRootPath,
                 session: session,
-                item: item,
-                completeOnSuccess: true,
-                isDirectory: true
-            ) { [weak self] succeeded in
-                guard let self else {
+                item: item
+            ) { [weak self] in
+                guard let self else { completion?(); return }
+                if item.status.isSuccessful {
+                    self.scheduleRefreshAfterMutation(path: remoteRootPath)
                     completion?()
                     return
                 }
-                if succeeded {
-                    self.scheduleRefreshAfterMutation(path: self.currentPath)
-                    ConnectionLog.shared.log(
-                        "Uploaded folder \(localURL.lastPathComponent) to \(remoteRootPath)\(Self.transferSizeSuffix(for: item))",
-                        level: .success,
-                        session: session.name
-                    )
-                    completion?()
-                    return
-                }
-
-                ConnectionLog.shared.log(
-                    "Fast folder upload failed for \(localURL.lastPathComponent); retrying with SFTP",
-                    level: .warning,
-                    session: session.name
-                )
-                self.uploadDirectoryTreeWithSFTP(
-                    localURL: localURL,
-                    remoteRootPath: remoteRootPath,
+                guard case .failed = item.status else { completion?(); return }
+                item.addDetailLine("SFTP directory transfer failed; retrying with rsync")
+                self.rsyncTransfer(
+                    from: localURL.path.hasSuffix("/") ? localURL.path : localURL.path + "/",
+                    to: self.remoteLocation(session: session, path: remoteRootPath),
                     session: session,
                     item: item,
-                    completion: completion
-                )
+                    completeOnSuccess: true,
+                    isDirectory: true
+                ) { _ in completion?() }
             }
         }
     }
@@ -1181,7 +1140,7 @@ class SFTPManager: ObservableObject {
                 let commands = filesToTransfer.map { fileURL -> String in
                     let relativePath = self.relativeUploadPath(for: fileURL, root: localURL)
                     let remotePath = Self.joinRemotePath(remoteRootPath, relativePath)
-                    return "put -a \(Self.sftpLocalPath(fileURL.path)) \(Self.sftpRemotePath(remotePath))"
+                    return "put \(Self.sftpLocalPath(fileURL.path)) \(Self.sftpRemotePath(remotePath))"
                 }
 
                 self.sftpTransfer(commands: commands, session: session, item: item, isDirectory: true) { succeeded in
@@ -1218,8 +1177,8 @@ class SFTPManager: ObservableObject {
         ensureWritableRemoteDirectory(at: parentPath, session: session) { [weak self] ensured in
             guard let self else { return }
             guard ensured else {
-                item.status = .failed("Remote directory is not writable: \(parentPath)")
-                item.addDetailLine("Open a writable folder for this profile and try again.")
+                item.status = .failed("Could not create or access remote directory: \(parentPath)")
+                item.addDetailLine("Check the remote folder permissions for this profile and try again.")
                 completion?()
                 return
             }
@@ -1250,8 +1209,8 @@ class SFTPManager: ObservableObject {
         ensureWritableRemoteDirectory(at: parentPath, session: session) { [weak self] ensured in
             guard let self else { return }
             guard ensured else {
-                item.status = .failed("Remote directory is not writable: \(parentPath)")
-                item.addDetailLine("Open a writable folder for this profile and try again.")
+                item.status = .failed("Could not create or access remote directory: \(parentPath)")
+                item.addDetailLine("Check the remote folder permissions for this profile and try again.")
                 completion?()
                 return
             }
@@ -1318,18 +1277,22 @@ class SFTPManager: ObservableObject {
             completion(true)
             return
         }
-        let quotedPath = SSHSecurity.remoteShellPath(path)
-        runSSHWithStatus(session: session, command: "mkdir -p -- \(quotedPath) && [ -w \(quotedPath) ]") { status, output in
+        runSSHWithStatus(session: session, command: Self.remoteUploadDirectoryPreflightCommand(path: path)) { status, output in
             if status != 0 {
                 let detail = output?.trimmingCharacters(in: .whitespacesAndNewlines)
                 ConnectionLog.shared.log(
-                    detail?.isEmpty == false ? "Remote directory is not writable: \(path): \(detail!)" : "Remote directory is not writable: \(path)",
+                    detail?.isEmpty == false ? "Could not create or access remote directory: \(path): \(detail!)" : "Could not create or access remote directory: \(path)",
                     level: .error,
                     session: session.name
                 )
             }
             completion(status == 0)
         }
+    }
+
+    nonisolated static func remoteUploadDirectoryPreflightCommand(path: String) -> String {
+        let quotedPath = SSHSecurity.remoteShellPath(path)
+        return "mkdir -p -- \(quotedPath) && [ -d \(quotedPath) ]"
     }
 
     private func collectUploadEntries(in root: URL) -> (directories: [URL], files: [URL]) {
@@ -1782,6 +1745,37 @@ class SFTPManager: ObservableObject {
         remoteItems.count == 1 && remoteItems.first?.isDirectory == false
     }
 
+    enum SingleFileDestination: Equatable, Sendable {
+        case directory(URL)
+        case saveAs(URL)
+    }
+
+    func downloadSingleFile(
+        remoteItem: (remotePath: String, name: String, isDirectory: Bool),
+        destination: SingleFileDestination,
+        session: Session,
+        completion: (@MainActor () -> Void)? = nil
+    ) {
+        let finalURL = Self.singleFileFinalDestination(name: remoteItem.name, destination: destination)
+        download(
+            remotePath: remoteItem.remotePath,
+            name: remoteItem.name,
+            isDirectory: false,
+            to: finalURL,
+            session: session,
+            completion: completion
+        )
+    }
+
+    nonisolated static func singleFileFinalDestination(name: String, destination: SingleFileDestination) -> URL {
+        switch destination {
+        case .directory(let directory):
+            return directory.appendingPathComponent(name)
+        case .saveAs(let file):
+            return file
+        }
+    }
+
     private func sftpTransfer(commands: [String], session: Session,
                               item: TransferItem, isDirectory: Bool = false,
                               completion: (@MainActor (Bool) -> Void)?,
@@ -1863,6 +1857,7 @@ class SFTPManager: ObservableObject {
 
         item.profileLabel = isDirectory ? "SFTP folder transfer" : "SFTP transfer"
         item.status = .inProgress
+        item.transferState = .transferring
         item.startedAt = Date()
         ConnectionLog.shared.log(
             "Starting \(Self.transferAction(for: item.direction)): \(item.name)",
@@ -1898,7 +1893,7 @@ class SFTPManager: ObservableObject {
                         level: .error,
                         session: session.name
                     )
-                    if let fallback {
+                    if let fallback, Self.isRetryableTransferFailure(message) {
                         fallback()
                     } else {
                         completion?(false)
@@ -1978,6 +1973,7 @@ class SFTPManager: ObservableObject {
         process.standardError  = pipe
 
         item.status    = .inProgress
+        item.transferState = .transferring
         item.startedAt = Date()
 
         process.terminationHandler = { @Sendable p in
@@ -2032,6 +2028,48 @@ class SFTPManager: ObservableObject {
                 completion?(false)
             }
         }
+    }
+
+    private func rsyncTransferWithRetry(from: String, to: String, session: Session,
+                                        item: TransferItem, completeOnSuccess: Bool = true,
+                                        isDirectory: Bool = false,
+                                        extraArgs: [String] = [],
+                                        attempts: Int = 3,
+                                        completion: (@MainActor (Bool) -> Void)?) {
+        let maxAttempts = max(1, attempts)
+
+        func runAttempt(_ attempt: Int) {
+            if attempt > 1 {
+                item.addDetailLine("rsync retry \(attempt)/\(maxAttempts)")
+            }
+            rsyncTransfer(
+                from: from,
+                to: to,
+                session: session,
+                item: item,
+                completeOnSuccess: completeOnSuccess,
+                isDirectory: isDirectory,
+                extraArgs: extraArgs
+            ) { succeeded in
+                if succeeded {
+                    completion?(true)
+                    return
+                }
+                let message = item.failureLabel ?? "rsync failed"
+                item.addDetailLine("rsync attempt \(attempt) failed: \(Self.sanitizedTransferMessage(message))")
+                guard attempt < maxAttempts, Self.isRetryableTransferFailure(message) else {
+                    item.status = .failed("rsync fallback failed after \(attempt) attempt\(attempt == 1 ? "" : "s"): \(message)")
+                    completion?(false)
+                    return
+                }
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(350 * attempt))
+                    runAttempt(attempt + 1)
+                }
+            }
+        }
+
+        runAttempt(1)
     }
 
     // Parses rsync --progress output lines. For folders this is per-file progress,
@@ -2264,6 +2302,27 @@ class SFTPManager: ObservableObject {
         return " (\(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)))"
     }
 
+    nonisolated static func isRetryableTransferFailure(_ message: String) -> Bool {
+        let lower = message.lowercased()
+        return lower.contains("connection closed")
+            || lower.contains("connection timed out")
+            || lower.contains("timed out during banner exchange")
+            || lower.contains("could not resolve hostname")
+            || lower.contains("temporary failure")
+            || lower.contains("connection reset")
+            || lower.contains("broken pipe")
+    }
+
+    nonisolated static func sanitizedTransferMessage(_ message: String) -> String {
+        message
+            .replacingOccurrences(of: NSHomeDirectory(), with: "<home>")
+            .replacingOccurrences(
+                of: #"/home/users/clauberh/[^\s]+"#,
+                with: "<remote-path>",
+                options: .regularExpression
+            )
+    }
+
     private static func sftpCommandBatches(from commands: [String]) -> [[String]] {
         let maxBatchBytes = 24_000
         var batches: [[String]] = []
@@ -2371,6 +2430,151 @@ class SFTPManager: ObservableObject {
                 completion(255, error.localizedDescription)
             }
         }
+    }
+
+    func executePipelineDownload(
+        request: TransferRequest,
+        plan: TransferPlan,
+        session: Session,
+        item: TransferItem,
+        completion: (@MainActor (TransferResult) -> Void)? = nil
+    ) {
+        let destination = URL(fileURLWithPath: plan.finalDestination)
+        item.transferState = .preparing
+        if request.itemType == .directory {
+            downloadDirectoryTree(
+                remotePath: request.sourcePath,
+                name: TransferPlanner.basename(of: request.sourcePath, endpoint: request.sourceEndpoint),
+                to: destination,
+                session: session,
+                item: item
+            ) { [weak self] in
+                let result: TransferResult = item.status.isSuccessful ? .success : self?.pipelineResult(for: item) ?? .failed(.unknown("Download failed"))
+                completion?(result)
+            }
+        } else {
+            download(
+                remotePath: request.sourcePath,
+                name: TransferPlanner.basename(of: request.sourcePath, endpoint: request.sourceEndpoint),
+                isDirectory: false,
+                to: destination,
+                session: session,
+                item: item
+            ) { [weak self] in
+                completion?(item.status.isSuccessful ? .success : self?.pipelineResult(for: item) ?? .failed(.unknown("Download failed")))
+            }
+        }
+    }
+
+    func executePipelineUpload(
+        request: TransferRequest,
+        plan: TransferPlan,
+        session: Session,
+        item: TransferItem,
+        completion: (@MainActor (TransferResult) -> Void)? = nil
+    ) {
+        let localURL = URL(fileURLWithPath: request.sourcePath)
+        item.transferState = .preparing
+        let isDirectory = request.itemType == .directory
+        if isDirectory {
+            uploadDirectoryTree(localURL: localURL, session: session, remoteRootPath: plan.finalDestination, item: item) { [weak self] in
+                completion?(item.status.isSuccessful ? .success : self?.pipelineResult(for: item) ?? .failed(.unknown("Upload failed")))
+            }
+        } else {
+            guard let partialPath = plan.partialDestination else {
+                completion?(.failed(.invalidPath))
+                return
+            }
+            let parentPath = Self.remoteParentPath(plan.finalDestination) ?? currentPath
+            ensureRemoteDirectory(at: parentPath, session: session) { [weak self] ensured in
+                guard let self, ensured else {
+                    completion?(.failed(.missingParent))
+                    return
+                }
+                item.transferState = .transferring
+                self.sftpTransfer(
+                    command: "put \(Self.sftpLocalPath(localURL.path)) \(Self.sftpRemotePath(partialPath))",
+                    session: session,
+                    item: item,
+                    isDirectory: false
+                ) { [weak self] succeeded in
+                    guard let self, succeeded else {
+                        completion?(self?.pipelineResult(for: item) ?? .failed(.unknown("Upload failed")))
+                        return
+                    }
+                    item.transferState = .finalizing
+                    self.finishUpload(localName: localURL.lastPathComponent, stagedPath: partialPath,
+                                      remotePath: plan.finalDestination, session: session, item: item) {
+                        completion?(item.status.isSuccessful ? .success : self.pipelineResult(for: item))
+                    }
+                } fallback: { [weak self] in
+                    guard let self else { return }
+                    item.addDetailLine("SFTP transport failed; retrying with rsync")
+                    self.rsyncTransfer(
+                        from: localURL.path,
+                        to: self.remoteLocation(session: session, path: partialPath),
+                        session: session,
+                        item: item,
+                        completeOnSuccess: false,
+                        isDirectory: false
+                    ) { succeeded in
+                        guard succeeded else {
+                            completion?(self.pipelineResult(for: item))
+                            return
+                        }
+                        item.transferState = .finalizing
+                        self.finishUpload(localName: localURL.lastPathComponent, stagedPath: partialPath,
+                                          remotePath: plan.finalDestination, session: session, item: item) {
+                            completion?(item.status.isSuccessful ? .success : self.pipelineResult(for: item))
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    func executePipelineMove(
+        request: TransferRequest,
+        plan: TransferPlan,
+        session: Session,
+        item: TransferItem,
+        completion: (@MainActor (TransferResult) -> Void)? = nil
+    ) {
+        moveClipboardItemsSameServer(
+            [SFTPClipboardItem(path: request.sourcePath,
+                               name: TransferPlanner.basename(of: plan.finalDestination, endpoint: request.destinationEndpoint),
+                               isDirectory: request.itemType == .directory)],
+            to: request.destinationDirectory,
+            session: session,
+            overwrite: request.conflictPolicy == .overwrite
+        ) { [weak self] succeeded in
+            completion?(succeeded ? .success : self?.pipelineResult(for: item) ?? .failed(.unknown("Move failed")))
+        }
+    }
+
+    func executePipelineServerCopy(
+        request: TransferRequest,
+        plan: TransferPlan,
+        session: Session,
+        item: TransferItem,
+        completion: (@MainActor (TransferResult) -> Void)? = nil
+    ) {
+        let sourceName = TransferPlanner.basename(of: request.sourcePath, endpoint: request.sourceEndpoint)
+        let source = RemoteFile(name: sourceName, isDirectory: request.itemType == .directory, size: "", permissions: "", modified: "", modifiedDate: nil)
+        copyFile(source, to: TransferPlanner.basename(of: plan.finalDestination, endpoint: request.destinationEndpoint))
+        item.transferState = .verifying
+        item.status = .completed
+        item.transferState = .completed
+        item.percentDone = 100
+        completion?(.success)
+    }
+
+    private func pipelineResult(for item: TransferItem) -> TransferResult {
+        if item.failureCause == .cancelled || item.status.isCancelled { return .cancelled }
+        if item.status.isPartial { return .partial }
+        if let cause = item.failureCause { return .failed(cause) }
+        if case .failed(let message) = item.status { return .failed(TransferFailureClassifier.classify(message)) }
+        return .failed(.unknown("Transfer failed"))
     }
 
     nonisolated private static func parse(lsOutput: String) -> [RemoteFile] {

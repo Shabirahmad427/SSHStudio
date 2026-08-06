@@ -1,4 +1,5 @@
 import CryptoKit
+import Darwin
 import Foundation
 
 enum SSHSecurity {
@@ -47,26 +48,28 @@ enum SSHSecurity {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support")
         let directory = base.appendingPathComponent("SSH Studio/ControlSockets", isDirectory: true)
-        if openSSHOptionSafePath(directory.path), secureDirectory(directory) {
+        if openSSHOptionSafePath(directory.path),
+           controlPathFitsUnixSocketLimit(directory: directory),
+           secureDirectory(directory) {
             return directory
         }
-        let runtime = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-            .appendingPathComponent("ssh-studio-\(sanitizedRuntimeComponent(NSUserName()))/ControlSockets", isDirectory: true)
+        let runtime = URL(fileURLWithPath: "/tmp", isDirectory: true)
+            .appendingPathComponent("sshs-\(getuid())", isDirectory: true)
         _ = secureDirectory(runtime)
         return runtime
+    }
+
+    private static func controlPathFitsUnixSocketLimit(directory: URL) -> Bool {
+        let longestControlPath = directory
+            .appendingPathComponent("ssh-studio-\(String(repeating: "f", count: 32)).sock")
+            .path
+        return longestControlPath.utf8.count < 100
     }
 
     private static func openSSHOptionSafePath(_ path: String) -> Bool {
         !path.unicodeScalars.contains {
             CharacterSet.whitespacesAndNewlines.contains($0) || $0.value < 0x20
         }
-    }
-
-    private static func sanitizedRuntimeComponent(_ value: String) -> String {
-        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "._-"))
-        let scalars = value.unicodeScalars.map { allowed.contains($0) ? Character($0) : "_" }
-        let sanitized = String(scalars)
-        return sanitized.isEmpty ? "user" : sanitized
     }
 
     @discardableResult

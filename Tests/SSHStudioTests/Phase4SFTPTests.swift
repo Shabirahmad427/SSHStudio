@@ -1,10 +1,279 @@
 import Foundation
+import CryptoKit
 import Testing
 @testable import SSHStudio
 
 @Suite("SSH Studio Phase 4 SFTP")
 @MainActor
 struct Phase4SFTPTests {
+
+    @Test func transferPlannerCoversEverySupportedMatrixCell() throws {
+        let localID = UUID()
+        let remoteID = UUID()
+        let otherRemoteID = UUID()
+        let cells: [(TransferEndpoint, TransferEndpoint, TransferItemType, TransferOperation, TransferEngine)] = [
+            (.remote(profileID: remoteID), .local, .file, .copy, .sftpGet),
+            (.remote(profileID: remoteID), .local, .directory, .copy, .recursiveSFTPGet),
+            (.local, .remote(profileID: remoteID), .file, .copy, .sftpPut),
+            (.local, .remote(profileID: remoteID), .directory, .copy, .recursiveSFTPPut),
+            (.remote(profileID: remoteID), .remote(profileID: remoteID), .file, .move, .sftpRename),
+            (.remote(profileID: remoteID), .remote(profileID: remoteID), .directory, .copy, .localRelay),
+            (.remote(profileID: remoteID), .remote(profileID: otherRemoteID), .file, .copy, .localRelay),
+            (.local, .local, .file, .copy, .localCopy)
+        ]
+
+        for (source, destination, type, operation, expected) in cells {
+            let request = TransferRequest(
+                sourceEndpoint: source,
+                destinationEndpoint: destination,
+                itemType: type,
+                operation: operation,
+                sourcePath: source == .local ? "/tmp/ssh studio source.txt" : "~/folder/source.txt",
+                destinationDirectory: destination == .local ? "/tmp/ssh studio target" : "~/folder/target"
+            )
+            #expect(try TransferPlanner.plan(for: request).engine == expected)
+        }
+
+        let unsupportedMove = TransferRequest(
+            sourceEndpoint: .local,
+            destinationEndpoint: .local,
+            itemType: .file,
+            operation: .move,
+            sourcePath: "/tmp/source",
+            destinationDirectory: "/tmp/target"
+        )
+        #expect(throws: TransferFailureCause.unsupportedCapability) {
+            _ = try TransferPlanner.plan(for: unsupportedMove)
+        }
+        let crossServerMove = TransferRequest(sourceEndpoint: .remote(profileID: remoteID), destinationEndpoint: .remote(profileID: otherRemoteID),
+                                              itemType: .file, operation: .move, sourcePath: "/tmp/source", destinationDirectory: "/tmp/target")
+        #expect(throws: TransferFailureCause.unsupportedCapability) {
+            _ = try TransferPlanner.plan(for: crossServerMove)
+        }
+        _ = localID
+    }
+
+    @Test func transferPlannerAppendsBasenameExactlyOnceAndPreservesRemoteHome() throws {
+        let remote = TransferRequest(
+            sourceEndpoint: .remote(profileID: UUID()),
+            destinationEndpoint: .remote(profileID: UUID()),
+            itemType: .directory,
+            sourcePath: "~/A Folder/MDDF",
+            destinationDirectory: "~/target"
+        )
+        #expect(try TransferPlanner.finalDestination(for: remote) == "~/target/MDDF")
+
+        let local = TransferRequest(
+            sourceEndpoint: .remote(profileID: UUID()),
+            destinationEndpoint: .local,
+            itemType: .file,
+            sourcePath: "/remote/--quoted \"file\" é.txt",
+            destinationDirectory: "/tmp/target"
+        )
+        #expect(try TransferPlanner.finalDestination(for: local).hasSuffix("/--quoted \"file\" é.txt"))
+
+        let saveAs = TransferRequest(
+            sourceEndpoint: .remote(profileID: UUID()),
+            destinationEndpoint: .local,
+            itemType: .file,
+            sourcePath: "/remote/original.txt",
+            destinationDirectory: "/tmp/target",
+            destinationName: "exact name.txt"
+        )
+        #expect(try TransferPlanner.finalDestination(for: saveAs) == "/tmp/target/exact name.txt")
+    }
+
+    @Test func transferFailureClassifierKeepsNonFallbackFailuresTyped() {
+        #expect(TransferFailureClassifier.classify("Permission denied") == .permissionDenied)
+        #expect(TransferFailureClassifier.classify("Read-only file system") == .readOnlyFilesystem)
+        #expect(TransferFailureClassifier.classify("Disk quota exceeded") == .quotaExceeded)
+        #expect(TransferFailureClassifier.classify("No space left on device") == .noSpace)
+        #expect(TransferFailureClassifier.classify("Host key verification failed") == .hostKeyRejected)
+        #expect(TransferFailureClassifier.classify("Authentication failed") == .authenticationFailed)
+        #expect(TransferFailureClassifier.classify("Connection closed") == .connectionLost)
+    }
+
+    @Test func localPipelineConflictPoliciesAreExecutable() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("sshstudio-conflicts-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("source.txt")
+        let destination = root.appendingPathComponent("target", isDirectory: true)
+        try Data("new".utf8).write(to: source)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        try Data("old".utf8).write(to: destination.appendingPathComponent("source.txt"))
+
+        func run(_ policy: TransferConflictPolicy) async -> TransferResult {
+            let request = TransferRequest(sourceEndpoint: .local, destinationEndpoint: .local, itemType: .file,
+                                          sourcePath: source.path, destinationDirectory: destination.path,
+                                          conflictPolicy: policy)
+            return await Self.submit(request, name: source.lastPathComponent)
+        }
+
+        #expect(await run(.fail) == .failed(.destinationExists))
+        #expect(await run(.overwrite) == .success)
+        #expect(String(data: try Data(contentsOf: destination.appendingPathComponent("source.txt")), encoding: .utf8) == "new")
+        #expect(await run(.keepBoth) == .success)
+        #expect(FileManager.default.fileExists(atPath: destination.appendingPathComponent("source copy 2.txt").path))
+    }
+    private static let clauberhRealDownloadFlag = "SSHSTUDIO_REAL_CLAUBERH_DOWNLOAD"
+    private static let clauberhRemoteFile = "/home/users/clauberh/13-shabir-GH39/01-mec-shabir-pdynamo2/PM6_new/02_mec2Dscan_1Ac-1C/02-pes2/01-30.29/00-rs-ps-cons-con-lg-improve2/0-pmf2/00_PMF_CRD-distance-WAT.py"
+    private static let clauberhFileName = "00_PMF_CRD-distance-WAT.py"
+
+    @Test func realUnifiedTransferMatrixOnDocinhoAndCoaraciWhenEnabled() async throws {
+        guard ProcessInfo.processInfo.environment["SSHSTUDIO_REAL_TRANSFER_MATRIX"] == "1" else { return }
+
+        let docinho = Session(name: "docinho", host: "docinho", username: "shabir",
+                              authentication: .privateKey(path: "~/.ssh/id_ed25519", useAgent: true, addKeysToAgent: false, useKeychain: false),
+                              privateKeyPath: "~/.ssh/id_ed25519", sshConfigAlias: "docinho")
+        let coaraci = Session(name: "sahmaddo", host: "sahmaddo", username: "sahmaddo",
+                              authentication: .privateKey(path: "~/.ssh/id_ed25519", useAgent: true, addKeysToAgent: false, useKeychain: false),
+                              privateKeyPath: "~/.ssh/id_ed25519", sshConfigAlias: "sahmaddo")
+        let docManager = SFTPManager()
+        let coaManager = SFTPManager()
+        let localRoot = FileManager.default.temporaryDirectory.appendingPathComponent("sshstudio-matrix-\(UUID().uuidString)", isDirectory: true)
+        let docRoot = "/tmp/sshstudio-transfer-matrix-\(UUID().uuidString)"
+        let coaRoot = "/tmp/sshstudio-transfer-matrix-\(UUID().uuidString)"
+        try FileManager.default.createDirectory(at: localRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: localRoot) }
+
+        let sourceFile = localRoot.appendingPathComponent("file with spaces --.txt")
+        let sourceDirectory = localRoot.appendingPathComponent("folder with spaces", isDirectory: true)
+        let nestedFile = sourceDirectory.appendingPathComponent("nested/--leading.txt")
+        try FileManager.default.createDirectory(at: nestedFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("unified transfer matrix\n".utf8).write(to: sourceFile)
+        try Data("nested content\n".utf8).write(to: nestedFile)
+
+        _ = try await Self.runRemote(docinho, command: "mkdir -p -- \(SSHSecurity.remoteShellPath(docRoot))")
+        _ = try await Self.runRemote(coaraci, command: "mkdir -p -- \(SSHSecurity.remoteShellPath(coaRoot))")
+        docManager.setActiveSessionForTesting(docinho, currentPath: docRoot)
+        coaManager.setActiveSessionForTesting(coaraci, currentPath: coaRoot)
+
+        let uploadFile = TransferRequest(sourceEndpoint: .local, destinationEndpoint: .remote(profileID: docinho.id),
+                                         itemType: .file, sourcePath: sourceFile.path, destinationDirectory: docRoot)
+        let uploadFileResult = await Self.submit(uploadFile, name: sourceFile.lastPathComponent, destinationSession: docinho, destinationManager: docManager)
+        if uploadFileResult != .success {
+            let item = TransferQueue.shared.items.first
+            Issue.record("file upload: \(uploadFileResult.description) details=\(item?.detailLines.joined(separator: " | ") ?? "")")
+        }
+        let uploadedHash = try? await Self.remoteHash(docinho, path: "\(docRoot)/\(sourceFile.lastPathComponent)")
+        #expect(uploadedHash == Self.localHash(sourceFile))
+
+        let uploadDirectory = TransferRequest(sourceEndpoint: .local, destinationEndpoint: .remote(profileID: docinho.id),
+                                              itemType: .directory, sourcePath: sourceDirectory.path, destinationDirectory: docRoot)
+        #expect(await Self.submit(uploadDirectory, name: sourceDirectory.lastPathComponent, destinationSession: docinho, destinationManager: docManager) == .success)
+        let sameServerDirectoryCopy = TransferRequest(sourceEndpoint: .remote(profileID: docinho.id), destinationEndpoint: .remote(profileID: docinho.id),
+                                                       itemType: .directory, sourcePath: "\(docRoot)/\(sourceDirectory.lastPathComponent)",
+                                                       destinationDirectory: docRoot, destinationName: "folder copy")
+        #expect(await Self.submit(sameServerDirectoryCopy, name: "folder copy", sourceSession: docinho,
+                                  destinationSession: docinho, sourceManager: docManager, destinationManager: docManager) == .success)
+        #expect(try await Self.remoteHash(docinho, path: "\(docRoot)/folder copy/nested/--leading.txt") == Self.localHash(nestedFile))
+
+        let downloads = localRoot.appendingPathComponent("downloads", isDirectory: true)
+        try FileManager.default.createDirectory(at: downloads, withIntermediateDirectories: true)
+        let downloadFile = TransferRequest(sourceEndpoint: .remote(profileID: docinho.id), destinationEndpoint: .local,
+                                            itemType: .file, sourcePath: "\(docRoot)/\(sourceFile.lastPathComponent)", destinationDirectory: downloads.path)
+        #expect(await Self.submit(downloadFile, name: sourceFile.lastPathComponent, sourceSession: docinho, sourceManager: docManager) == .success)
+        #expect(try Data(contentsOf: downloads.appendingPathComponent(sourceFile.lastPathComponent)) == Data(contentsOf: sourceFile))
+
+        let downloadDirectory = TransferRequest(sourceEndpoint: .remote(profileID: docinho.id), destinationEndpoint: .local,
+                                                itemType: .directory, sourcePath: "\(docRoot)/\(sourceDirectory.lastPathComponent)", destinationDirectory: downloads.path)
+        #expect(await Self.submit(downloadDirectory, name: sourceDirectory.lastPathComponent, sourceSession: docinho, sourceManager: docManager) == .success)
+        #expect(try Data(contentsOf: downloads.appendingPathComponent(sourceDirectory.lastPathComponent).appendingPathComponent("nested/--leading.txt")) == Data(contentsOf: nestedFile))
+
+        let movedName = "moved file.txt"
+        let move = TransferRequest(sourceEndpoint: .remote(profileID: docinho.id), destinationEndpoint: .remote(profileID: docinho.id),
+                                   itemType: .file, operation: .move, sourcePath: "\(docRoot)/\(sourceFile.lastPathComponent)", destinationDirectory: docRoot, destinationName: movedName)
+        #expect(await Self.submit(move, name: movedName, sourceSession: docinho, sourceManager: docManager, destinationManager: docManager) == .success)
+        let copy = TransferRequest(sourceEndpoint: .remote(profileID: docinho.id), destinationEndpoint: .remote(profileID: docinho.id),
+                                   itemType: .file, sourcePath: "\(docRoot)/\(movedName)", destinationDirectory: docRoot, destinationName: "copy.txt")
+        let copyResult = await Self.submit(copy, name: "copy.txt", sourceSession: docinho, destinationSession: docinho, sourceManager: docManager, destinationManager: docManager)
+        if copyResult != .success {
+            let item = TransferQueue.shared.items.first
+            Issue.record("same-server copy: \(copyResult.description) details=\(item?.detailLines.joined(separator: " | ") ?? "")")
+        }
+
+        let stagedFromDoc = localRoot.appendingPathComponent("staged-from-doc", isDirectory: true)
+        try FileManager.default.createDirectory(at: stagedFromDoc, withIntermediateDirectories: true)
+        let crossDown = TransferRequest(sourceEndpoint: .remote(profileID: docinho.id), destinationEndpoint: .local,
+                                        itemType: .file, sourcePath: "\(docRoot)/\(movedName)", destinationDirectory: stagedFromDoc.path)
+        let crossDownResult = await Self.submit(crossDown, name: movedName, sourceSession: docinho, sourceManager: docManager)
+        if crossDownResult != .success { Issue.record("docinho to local staged transfer: \(crossDownResult.description)") }
+        let crossUp = TransferRequest(sourceEndpoint: .local, destinationEndpoint: .remote(profileID: coaraci.id),
+                                      itemType: .file, sourcePath: stagedFromDoc.appendingPathComponent(movedName).path, destinationDirectory: coaRoot)
+        let crossUpResult = await Self.submit(crossUp, name: movedName, destinationSession: coaraci, destinationManager: coaManager)
+        if crossUpResult != .success { Issue.record("local staged to Coaraci transfer: \(crossUpResult.description)") }
+        #expect(try await Self.remoteHash(coaraci, path: "\(coaRoot)/\(movedName)") == Self.localHash(stagedFromDoc.appendingPathComponent(movedName)))
+
+        let crossDirectory = TransferRequest(sourceEndpoint: .remote(profileID: docinho.id), destinationEndpoint: .remote(profileID: coaraci.id),
+                                             itemType: .directory, sourcePath: "\(docRoot)/\(sourceDirectory.lastPathComponent)", destinationDirectory: coaRoot)
+        #expect(await Self.submit(crossDirectory, name: sourceDirectory.lastPathComponent, sourceSession: docinho,
+                                  destinationSession: coaraci, sourceManager: docManager, destinationManager: coaManager) == .success)
+
+        let stagedFromCoa = localRoot.appendingPathComponent("staged-from-coa", isDirectory: true)
+        try FileManager.default.createDirectory(at: stagedFromCoa, withIntermediateDirectories: true)
+        let reverseDown = TransferRequest(sourceEndpoint: .remote(profileID: coaraci.id), destinationEndpoint: .local,
+                                          itemType: .file, sourcePath: "\(coaRoot)/\(movedName)", destinationDirectory: stagedFromCoa.path)
+        let reverseDownResult = await Self.submit(reverseDown, name: movedName, sourceSession: coaraci, sourceManager: coaManager)
+        if reverseDownResult != .success { Issue.record("Coaraci to local staged transfer: \(reverseDownResult.description)") }
+        let reverseUp = TransferRequest(sourceEndpoint: .local, destinationEndpoint: .remote(profileID: docinho.id),
+                                        itemType: .file, sourcePath: stagedFromCoa.appendingPathComponent(movedName).path, destinationDirectory: docRoot, destinationName: "roundtrip.txt")
+        let reverseUpResult = await Self.submit(reverseUp, name: "roundtrip.txt", destinationSession: docinho, destinationManager: docManager)
+        if reverseUpResult != .success { Issue.record("local staged to docinho transfer: \(reverseUpResult.description)") }
+        #expect(try await Self.remoteHash(docinho, path: "\(docRoot)/roundtrip.txt") == Self.localHash(stagedFromCoa.appendingPathComponent(movedName)))
+
+        let reverseDirectory = TransferRequest(sourceEndpoint: .remote(profileID: coaraci.id), destinationEndpoint: .remote(profileID: docinho.id),
+                                               itemType: .directory, sourcePath: "\(coaRoot)/\(sourceDirectory.lastPathComponent)", destinationDirectory: docRoot)
+        #expect(await Self.submit(reverseDirectory, name: sourceDirectory.lastPathComponent, sourceSession: coaraci,
+                                  destinationSession: docinho, sourceManager: coaManager, destinationManager: docManager) == .success)
+
+        let localCopy = TransferRequest(sourceEndpoint: .local, destinationEndpoint: .local, itemType: .file,
+                                        sourcePath: sourceFile.path, destinationDirectory: localRoot.appendingPathComponent("local-copy").path)
+        #expect(await Self.submit(localCopy, name: sourceFile.lastPathComponent) == .success)
+        _ = try await Self.runRemote(docinho, command: "rm -rf -- \(SSHSecurity.remoteShellPath(docRoot))")
+        _ = try await Self.runRemote(coaraci, command: "rm -rf -- \(SSHSecurity.remoteShellPath(coaRoot))")
+    }
+
+    private static func submit(_ request: TransferRequest, name: String,
+                               sourceSession: Session? = nil, destinationSession: Session? = nil,
+                               sourceManager: SFTPManager? = nil, destinationManager: SFTPManager? = nil) async -> TransferResult {
+        await withCheckedContinuation { continuation in
+            TransferService.shared.submit(request, name: name, sourceSession: sourceSession,
+                                          destinationSession: destinationSession, sourceManager: sourceManager,
+                                          destinationManager: destinationManager) { result in
+                continuation.resume(returning: result)
+            }
+        }
+    }
+
+    private static func runRemote(_ session: Session, command: String) async throws -> String {
+        let invocation = try SSHCommandBuilder.remoteCommandInvocation(for: session, command: command, purpose: .sftp)
+        return try await withCheckedThrowingContinuation { continuation in
+            let process = Process()
+            let pipe = Pipe()
+            process.executableURL = invocation.executableURL
+            process.arguments = invocation.arguments
+            process.standardOutput = pipe
+            process.standardError = pipe
+            process.terminationHandler = { process in
+                let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                if process.terminationStatus == 0 { continuation.resume(returning: output) }
+                else { continuation.resume(throwing: SFTPError.operationFailed(output)) }
+            }
+            do { try process.run() } catch { continuation.resume(throwing: error) }
+        }
+    }
+
+    private static func remoteHash(_ session: Session, path: String) async throws -> String {
+        let output = try await runRemote(session, command: "sha256sum -- \(SSHSecurity.remoteShellPath(path))")
+        return output.split(whereSeparator: \.isWhitespace).first.map(String.init) ?? ""
+    }
+
+    private static func localHash(_ url: URL) -> String {
+        guard let data = try? Data(contentsOf: url) else { return "" }
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
     @Test func schemaTwoProfilesMigrateRemoteStartDirectoryToSchemaThree() throws {
         var session = Session(name: "Legacy", host: "example.com", username: "legacy", remoteDirectory: "~/work")
         session.schemaVersion = 2
@@ -505,6 +774,16 @@ struct Phase4SFTPTests {
         #expect(location.contains("00_PMF_CRD-distance-WAT.py"))
     }
 
+    @Test func uploadDirectoryPreflightDoesNotRequireShellWritableProbe() {
+        let command = SFTPManager.remoteUploadDirectoryPreflightCommand(
+            path: "/media/shabir/Expansion/00_Doctorate/01_Simulations/01_HiCel6a"
+        )
+
+        #expect(command.contains("mkdir -p --"))
+        #expect(command.contains("[ -d "))
+        #expect(command.contains("[ -w ") == false)
+    }
+
     @Test func singleFileBatchDownloadsUseFallbackCapablePipeline() {
         #expect(SFTPManager.shouldUseSingleFileDownloadPipeline(remoteItems: [
             (
@@ -520,5 +799,84 @@ struct Phase4SFTPTests {
         #expect(!SFTPManager.shouldUseSingleFileDownloadPipeline(remoteItems: [
             (remotePath: "/remote/folder", name: "folder", isDirectory: true)
         ]))
+    }
+
+    @Test func singleFileDestinationSemanticsSeparateDirectoryFromSaveAs() {
+        let directory = URL(fileURLWithPath: "/tmp/download target", isDirectory: true)
+        let saveAs = URL(fileURLWithPath: "/tmp/custom.py")
+
+        #expect(SFTPManager.singleFileFinalDestination(
+            name: "00_PMF_CRD-distance-WAT.py",
+            destination: .directory(directory)
+        ).path == "/tmp/download target/00_PMF_CRD-distance-WAT.py")
+        #expect(SFTPManager.singleFileFinalDestination(
+            name: "00_PMF_CRD-distance-WAT.py",
+            destination: .saveAs(saveAs)
+        ).path == "/tmp/custom.py")
+    }
+
+    @Test func rsyncFallbackUsesSystemSSHAndRetriesTransientJumpFailures() {
+        let session = Session(
+            name: "clauberh",
+            host: "clauberh",
+            username: "clauberh",
+            authentication: .sshConfigManaged,
+            sshConfigAlias: "clauberh"
+        )
+        let args = SSHCommandBuilder.rsyncSSHArgs(for: session)
+
+        #expect(args.first == "/usr/bin/ssh")
+        #expect(args.contains("ConnectTimeout=10"))
+        #expect(SFTPManager.isRetryableTransferFailure("Connection timed out during banner exchange"))
+        #expect(SFTPManager.isRetryableTransferFailure("ssh: Could not resolve hostname gate.example"))
+        #expect(SFTPManager.isRetryableTransferFailure("Connection closed by UNKNOWN port 65535"))
+    }
+
+    @Test func realClauberhSingleFileDownloadThroughAppServiceWhenEnabled() async throws {
+        guard ProcessInfo.processInfo.environment[Self.clauberhRealDownloadFlag] == "1" else { return }
+
+        let session = Session(
+            name: "clauberh",
+            host: "clauberh",
+            username: "clauberh",
+            authentication: .privateKey(path: "~/.ssh/id_ed25519", useAgent: true, addKeysToAgent: false, useKeychain: false),
+            privateKeyPath: "~/.ssh/id_ed25519",
+            sshConfigAlias: "clauberh",
+            remoteStartDirectory: (Self.clauberhRemoteFile as NSString).deletingLastPathComponent
+        )
+        let manager = SFTPManager()
+        manager.setActiveSessionForTesting(
+            session,
+            currentPath: (Self.clauberhRemoteFile as NSString).deletingLastPathComponent
+        )
+        let destination = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sshstudio-real-clauberh-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: destination) }
+
+        await withCheckedContinuation { continuation in
+            manager.downloadBatch(
+                remoteItems: [(
+                    remotePath: Self.clauberhRemoteFile,
+                    name: Self.clauberhFileName,
+                    isDirectory: false
+                )],
+                to: destination,
+                session: session
+            ) {
+                continuation.resume()
+            }
+        }
+
+        let downloaded = destination.appendingPathComponent(Self.clauberhFileName)
+        if !FileManager.default.fileExists(atPath: downloaded.path) {
+            let item = TransferQueue.shared.items.first
+            let status = item?.statusLabel ?? "missing transfer item"
+            let details = item?.detailLines.joined(separator: " | ") ?? ""
+            Issue.record("Real clauberh app-service download missing local file. status=\(status) details=\(details)")
+        }
+        let attributes = try FileManager.default.attributesOfItem(atPath: downloaded.path)
+        let size = try #require(attributes[.size] as? NSNumber).intValue
+        #expect(size > 0)
     }
 }

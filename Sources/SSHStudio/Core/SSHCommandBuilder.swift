@@ -181,6 +181,7 @@ enum SSHCommandBuilder {
             "-B", SFTPManager.sftpBufferSize,
             "-R", SFTPManager.sftpRequestCount,
             "-o", "BatchMode=yes",
+            "-o", "ConnectTimeout=10",
             "-o", "ControlMaster=auto",
             "-o", "ControlPath=\(SSHSecurity.controlPath(for: session))",
             "-o", "ControlPersist=10m",
@@ -208,8 +209,9 @@ enum SSHCommandBuilder {
 
     static func rsyncSSHArgs(for session: Session, qos: String = "throughput") -> [String] {
         var args = [
-            "ssh",
+            sshExecutableURL.path,
             "-o", "BatchMode=yes",
+            "-o", "ConnectTimeout=10",
             "-o", "ControlMaster=no",
             "-o", "ControlPath=\(SSHSecurity.controlPath(for: session))",
             "-o", "Compression=no",

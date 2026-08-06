@@ -139,6 +139,11 @@ struct TransferRowView: View {
                     Text(item.statusLabel)
                         .font(.system(size: 12))
                         .foregroundStyle(isActive ? accentColor : .secondary)
+                    if let engine = item.selectedEngine {
+                        Text("Engine: \(engine.rawValue)")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.tertiary)
+                    }
                     if isActive && !item.profileLabel.isEmpty {
                         Text(item.profileLabel)
                             .font(.system(size: 11))
@@ -149,6 +154,14 @@ struct TransferRowView: View {
                 Spacer()
 
                 if isFailed {
+                    Button {
+                        item.retryHandler?()
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(.secondary)
+                    .help("Retry transfer")
                     Button {
                         copyToPasteboard(Self.copyErrorText(for: item))
                     } label: {
@@ -272,6 +285,7 @@ struct TransferRowView: View {
             Button("Copy Name") { copyToPasteboard(item.name) }
             Button("Copy Status") { copyToPasteboard(item.statusLabel) }
             if isFailed {
+                Button("Retry Transfer") { item.retryHandler?() }
                 Button("Copy Error") { copyToPasteboard(Self.copyErrorText(for: item)) }
             }
             Button("Copy Details") { copyToPasteboard(Self.copyText(for: item)) }

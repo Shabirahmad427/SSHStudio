@@ -236,7 +236,18 @@ struct SFTPBrowserView: View {
         else { return }
         let destinationManager = manager(for: side == .left ? .right : .left)
         for url in urls {
-            destinationManager.upload(localURL: url, session: destinationSession) {
+            let isDirectory = (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
+            let request = TransferRequest(
+                sourceEndpoint: .local,
+                destinationEndpoint: .remote(profileID: destinationSession.id),
+                itemType: isDirectory ? .directory : .file,
+                sourcePath: url.path,
+                destinationDirectory: destinationManager.currentPath,
+                conflictPolicy: .fail
+            )
+            TransferService.shared.submit(request, name: url.lastPathComponent,
+                                          destinationSession: destinationSession,
+                                          destinationManager: destinationManager) { _ in
                 destinationManager.listFiles(at: destinationManager.currentPath, pushHistory: false)
             }
         }
@@ -278,14 +289,20 @@ struct SFTPBrowserView: View {
                       let sourceSession = sessionForPayload(first)
                 else { continue }
                 let sourceManager = managerForPayload(first, fallbackSide: side == .left ? .right : .left)
-                sourceManager.downloadBatch(
-                    remoteItems: group.map {
-                        (remotePath: $0.path, name: $0.name, isDirectory: $0.isDirectory)
-                    },
-                    to: localHistory.current,
-                    session: sourceSession
-                ) {
-                    loadLocalFiles()
+                for payload in group {
+                    let request = TransferRequest(
+                        sourceEndpoint: .remote(profileID: sourceSession.id),
+                        destinationEndpoint: .local,
+                        itemType: payload.isDirectory ? .directory : .file,
+                        sourcePath: payload.path,
+                        destinationDirectory: localHistory.current.path,
+                        conflictPolicy: .fail
+                    )
+                    TransferService.shared.submit(request, name: payload.name,
+                                                  sourceSession: sourceSession,
+                                                  sourceManager: sourceManager) { _ in
+                        loadLocalFiles()
+                    }
                 }
             }
         case .remote:
@@ -293,17 +310,20 @@ struct SFTPBrowserView: View {
             let destinationManager = manager(for: side)
             for payload in payloads {
                 guard let sourceSession = sessionForPayload(payload) else { continue }
-                destinationManager.copyRemoteToRemote(
-                    remotePath: payload.path,
-                    name: payload.name,
-                    isDirectory: payload.isDirectory,
-                    sourceSession: sourceSession,
-                    destinationSession: destinationSession,
-                    destinationPath: destinationManager.currentPath
-                ) { succeeded in
-                    if succeeded {
-                        destinationManager.listFiles(at: destinationManager.currentPath, pushHistory: false)
-                    }
+                let request = TransferRequest(
+                    sourceEndpoint: .remote(profileID: sourceSession.id),
+                    destinationEndpoint: .remote(profileID: destinationSession.id),
+                    itemType: payload.isDirectory ? .directory : .file,
+                    sourcePath: payload.path,
+                    destinationDirectory: destinationManager.currentPath,
+                    conflictPolicy: .fail
+                )
+                TransferService.shared.submit(request, name: payload.name,
+                                              sourceSession: sourceSession,
+                                              destinationSession: destinationSession,
+                                              sourceManager: managerForPayload(payload, fallbackSide: side == .left ? .right : .left),
+                                              destinationManager: destinationManager) { result in
+                    if result == .success { destinationManager.listFiles(at: destinationManager.currentPath, pushHistory: false) }
                 }
             }
         }
@@ -434,6 +454,25 @@ private func copyRemoteItemsToPasteboard(
 private func sftpClipboardFromPasteboard() -> SFTPClipboardPayload? {
     guard let data = NSPasteboard.general.data(forType: sftpClipboardPasteboardType) else { return nil }
     return try? JSONDecoder().decode(SFTPClipboardPayload.self, from: data)
+}
+
+@MainActor
+private func submitRemoteMoves(_ items: [SFTPClipboardItem], to destinationPath: String, session: Session, manager: SFTPManager) {
+    for item in items {
+        let request = TransferRequest(
+            sourceEndpoint: .remote(profileID: session.id),
+            destinationEndpoint: .remote(profileID: session.id),
+            itemType: item.isDirectory ? .directory : .file,
+            operation: .move,
+            sourcePath: item.path,
+            destinationDirectory: destinationPath,
+            conflictPolicy: .fail
+        )
+        TransferService.shared.submit(request, name: item.name, sourceSession: session,
+                                      sourceManager: manager, destinationManager: manager) { result in
+            if result == .success { manager.listFiles(at: manager.currentPath, pushHistory: false, forceRefresh: true) }
+        }
+    }
 }
 
 private final class DropCollector<Value>: @unchecked Sendable {
@@ -943,7 +982,7 @@ struct RemotePaneView: View {
                                 sftp.error = "Cross-server move is not supported. Copy the item, then delete the original after the copy completes."
                                 return
                             }
-                            sftp.moveClipboardItemsSameServer(payload.items, to: sftp.currentPath, session: session)
+                            submitRemoteMoves(payload.items, to: sftp.currentPath, session: session, manager: sftp)
                         }
                     } else {
                         onDrop(filePayloadsFromPasteboard())
@@ -1710,22 +1749,34 @@ struct RemoteFileList: View {
             isPasting = false
         case .move:
             guard payload.sourceProfileID == session.id else {
-                sftp.error = "Cross-server move is not supported. Copy the item, then delete the original after the copy completes."
+                sftp.error = "Move between different servers is not supported; use Copy and delete the source after verification."
                 isPasting = false
                 return
             }
-            sftp.moveClipboardItemsSameServer(
-                payload.items,
-                to: destinationPath,
-                session: session,
-                overwrite: overwrite
-            ) { succeeded in
-                isPasting = false
-                if succeeded {
-                    cutClipboard = nil
-                    NSPasteboard.general.clearContents()
+            for clipboardItem in payload.items {
+                let request = TransferRequest(
+                    sourceEndpoint: .remote(profileID: session.id),
+                    destinationEndpoint: .remote(profileID: session.id),
+                    itemType: clipboardItem.isDirectory ? .directory : .file,
+                    operation: .move,
+                    sourcePath: clipboardItem.path,
+                    destinationDirectory: destinationPath,
+                    conflictPolicy: overwrite ? .overwrite : .fail
+                )
+                TransferService.shared.submit(request, name: clipboardItem.name,
+                                              sourceSession: session,
+                                              sourceManager: sftp,
+                                              destinationManager: sftp) { result in
+                    let succeeded = result == .success
+                    if succeeded { sftp.listFiles(at: sftp.currentPath, pushHistory: false, forceRefresh: true) }
+                    if !succeeded { sftp.error = result.description }
+                    if succeeded && clipboardItem.path == payload.items.last?.path {
+                        cutClipboard = nil
+                        NSPasteboard.general.clearContents()
+                    }
                 }
             }
+            isPasting = false
         }
     }
 
@@ -1926,7 +1977,21 @@ struct RemoteFileList: View {
             let ext = (file.name as NSString).pathExtension
             let base = (file.name as NSString).deletingPathExtension
             let copyName = ext.isEmpty ? "\(base) copy" : "\(base) copy.\(ext)"
-            sftp.copyFile(file, to: copyName)
+            let request = TransferRequest(
+                sourceEndpoint: .remote(profileID: session.id),
+                destinationEndpoint: .remote(profileID: session.id),
+                itemType: file.isDirectory ? .directory : .file,
+                sourcePath: SFTPManager.childPath(parent: sftp.currentPath, child: file.name),
+                destinationDirectory: sftp.currentPath,
+                destinationName: copyName,
+                conflictPolicy: .fail
+            )
+            TransferService.shared.submit(request, name: copyName,
+                                          sourceSession: session,
+                                          sourceManager: sftp,
+                                          destinationManager: sftp) { _ in
+                sftp.listFiles(at: sftp.currentPath, pushHistory: false, forceRefresh: true)
+            }
         } label: { Label("Duplicate", systemImage: "doc.on.doc") }
         Button {
             selectForContextIfNeeded(file)
@@ -1961,9 +2026,15 @@ struct RemoteFileList: View {
         guard !file.isDirectory else { return }
         openingFile = file.name
         let tmpURL = FileManager.default.temporaryDirectory.appendingPathComponent(file.name)
-        sftp.download(file: file, to: tmpURL, session: session) {
+        let request = TransferRequest(sourceEndpoint: .remote(profileID: session.id), destinationEndpoint: .local,
+                                      itemType: .file,
+                                      sourcePath: SFTPManager.childPath(parent: sftp.currentPath, child: file.name),
+                                      destinationDirectory: tmpURL.deletingLastPathComponent().path,
+                                      destinationName: tmpURL.lastPathComponent,
+                                      conflictPolicy: .overwrite)
+        TransferService.shared.submit(request, name: file.name, sourceSession: session, sourceManager: sftp) { result in
             openingFile = nil
-            guard FileManager.default.fileExists(atPath: tmpURL.path) else { return }
+            guard result == .success, FileManager.default.fileExists(atPath: tmpURL.path) else { return }
             NSWorkspace.shared.open(tmpURL)
             startWatching(file: file, tmpURL: tmpURL)
         }
@@ -1973,9 +2044,15 @@ struct RemoteFileList: View {
         guard !file.isDirectory else { return }
         openingFile = file.name
         let tmpURL = FileManager.default.temporaryDirectory.appendingPathComponent(file.name)
-        sftp.download(file: file, to: tmpURL, session: session) {
+        let request = TransferRequest(sourceEndpoint: .remote(profileID: session.id), destinationEndpoint: .local,
+                                      itemType: .file,
+                                      sourcePath: SFTPManager.childPath(parent: sftp.currentPath, child: file.name),
+                                      destinationDirectory: tmpURL.deletingLastPathComponent().path,
+                                      destinationName: tmpURL.lastPathComponent,
+                                      conflictPolicy: .overwrite)
+        TransferService.shared.submit(request, name: file.name, sourceSession: session, sourceManager: sftp) { result in
             openingFile = nil
-            guard FileManager.default.fileExists(atPath: tmpURL.path) else { return }
+            guard result == .success, FileManager.default.fileExists(atPath: tmpURL.path) else { return }
             let cfg = NSWorkspace.OpenConfiguration()
             cfg.activates = true
             NSWorkspace.shared.open([tmpURL], withApplicationAt: appURL, configuration: cfg)
