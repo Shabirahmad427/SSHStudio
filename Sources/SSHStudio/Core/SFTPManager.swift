@@ -53,6 +53,7 @@ class SFTPManager: ObservableObject {
     private var hasConnected = false
     private var dirCache = SFTPDirectoryCache()
     private var persistentSFTP: PersistentSFTPSession?
+    private var persistentSFTPConnectTask: Task<PersistentSFTPSession, Error>?
     private var persistentCapability = SFTPPersistentCapabilityCircuitBreaker()
     private var activeListingTask: Task<Void, Never>?
     private var activeListingRequestID: UInt64 = 0
@@ -101,6 +102,12 @@ class SFTPManager: ObservableObject {
             return
         }
         // Tear down the old persistent session whenever the target server changes.
+        // Also cancel (rather than just ignore) any in-flight connect attempt for
+        // the previous session — otherwise it keeps running in the background and,
+        // when it eventually finishes, `getPersistentSFTP`'s completion would
+        // overwrite `persistentSFTP` with a session pointed at the wrong server.
+        persistentSFTPConnectTask?.cancel()
+        persistentSFTPConnectTask = nil
         persistentSFTP?.disconnect()
         persistentSFTP = nil
         persistentCapability.resetAll()
@@ -132,9 +139,25 @@ class SFTPManager: ObservableObject {
             throw SFTPSessionError.compatibilityUnavailable("persistent startup disabled for this app session")
         }
         if let existing = persistentSFTP, existing.isAlive { return existing }
+        // Coalesce concurrent callers (e.g. the initial listing plus an
+        // immediate navigation) onto a single in-flight connect attempt.
+        // Without this, each caller would independently see `persistentSFTP`
+        // as nil during the first caller's `await sftp.connect()` and spin up
+        // its own redundant PersistentSFTPSession + child sftp process racing
+        // over the same ControlMaster socket.
+        if let inFlight = persistentSFTPConnectTask {
+            return try await inFlight.value
+        }
         persistentSFTP?.disconnect()
-        let sftp = PersistentSFTPSession(session: session)
-        try await sftp.connect()
+        persistentSFTP = nil
+        let task = Task { () throws -> PersistentSFTPSession in
+            let sftp = PersistentSFTPSession(session: session)
+            try await sftp.connect()
+            return sftp
+        }
+        persistentSFTPConnectTask = task
+        defer { persistentSFTPConnectTask = nil }
+        let sftp = try await task.value
         persistentSFTP = sftp
         diagnosticStatus = .persistentActive
         return sftp
